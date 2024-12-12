@@ -6,8 +6,8 @@ import { Calendar } from "@/components/ui/calendar"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
-import { format, eachDayOfInterval } from 'date-fns'
-import { CalendarIcon, ChevronDown, ChevronUp, X } from "lucide-react"
+import { format } from 'date-fns'
+import { CalendarIcon, ChevronDown, ChevronUp, X, Clock } from "lucide-react"
 import { supabase } from '@/lib/supabase'
 
 const formatHoursAndMinutes = (hours: number): string => {
@@ -16,177 +16,290 @@ const formatHoursAndMinutes = (hours: number): string => {
   return `${h}h ${m}m`
 }
 
-interface TimeEntry {
-  user_id: string
-  confirmed_hours: number
-  unconfirmed_hours: number
-  user: {
-    nominative: string
-    email: string
-  }
-  activities?: {
-    title: string
-    start_time: number
-    end_time: number
-    duration: number
-    completed: boolean
-  }[]
+interface ProjectSummary {
+  projectId: string
+  title: string
+  totalHours: number
+  isBillable: boolean
+  percentage: number 
 }
 
+interface DailyEntry {
+  date: number
+  totalHours: number
+  confirmedHours: number
+  unconfirmedHours: number
+  billablePercentage: number
+  unassignedPercentage: number
+  projectSummaries: ProjectSummary[]
+  isExpanded?: boolean
+  billableHours: number
+}
 
-interface DayStats {
-  date: Date
-  underTimeUsers: number
-  noTimeUsers: number
-  entries: TimeEntry[]
-  usersWithNoTime: Array<{ nominative: string; email: string }>
+interface UserTimeData {
+  userId: string
+  nominative: string
+  email: string
+  confirmedHours: number
+  unconfirmedHours: number
+  billablePercentage: number
+  unassignedPercentage: number
+  projectSummaries: ProjectSummary[]
+  dailyEntries: DailyEntry[]
   isExpanded: boolean
 }
 
 interface SidebarState {
   isOpen: boolean
-  userData: TimeEntry | null
-  date: Date | null
+  userData: UserTimeData | null
+}
+
+interface TimeEntry{
+  uid: string;
+  user_id: string;
+  start_time: number;
+  end_time: number;
+  completed: boolean;
+  project: {
+      uid: string;
+      title: string;
+      not_billable: boolean;
+  };
 }
 
 export default function AdminDashboard() {
-  const [startDate, setStartDate] = useState<Date | undefined>(new Date())
+  const [startDate, setStartDate] = useState<Date | undefined>(new Date(new Date().getFullYear(), new Date().getMonth(), 1))
   const [endDate, setEndDate] = useState<Date | undefined>(new Date())
-  const [timeStats, setTimeStats] = useState<DayStats[]>([])
+  const [userTimeData, setUserTimeData] = useState<UserTimeData[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarState>({
     isOpen: false,
-    userData: null,
-    date: null
+    userData: null
   })
+
+  const PAGE_SIZE = 1000
 
   const fetchTimeTrackingData = async (start: Date, end: Date) => {
     setIsLoading(true)
     
-    const days = eachDayOfInterval({ start, end })
-    const statsPromises = days.map(async (day) => {
-      const dayStart = new Date(day)
-      dayStart.setHours(0, 0, 0, 0)
-      const dayEnd = new Date(day)
-      dayEnd.setHours(23, 59, 59, 999)
+    const dayStart = new Date(start)
+    dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(end)
+    dayEnd.setHours(23, 59, 59, 999)
 
-      // Fetch all active users
-      const { data: activeUsers, error: userError } = await supabase
-        .from('users')
-        .select('uid, nominative, email')
-        .eq('status', 'active')
+    // Fetch all active users
+    const { data: activeUsers, error: userError } = await supabase
+      .from('users')
+      .select('uid, nominative, email')
+      .eq('status', 'active')
 
-      console.log('Active users:', activeUsers)
-      if (userError) {
-        console.error('Error fetching users:', userError)
-        return null
-      }
+    if (userError) {
+      console.error('Error fetching users:', userError)
+      return
+    }
 
+    let allTimeEntries: TimeEntry [] = []
+    let hasMore = true
+    let currentPage = 0
+
+    while (hasMore) {
       const { data: timeEntries, error } = await supabase
         .from('time_blocking_events')
         .select(`
+          uid,
           user_id,
-          user:users!inner(
-            nominative,
-            email
-          ),
           start_time,
           end_time,
-          title,
-          completed
-        `)
+          completed,
+          project:projects (
+            uid,
+            title,
+            not_billable
+          )
+        `, { count: 'exact' })
         .gte('start_time', dayStart.getTime())
-        .lte('start_time', dayEnd.getTime())
         .lte('end_time', dayEnd.getTime())
-        .gte('end_time', dayStart.getTime())
         .eq('event_type', 'activity')
-        .eq('users.status', 'active')
-        //console.log('timeEntries dalla query', timeEntries)
+        .range(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE - 1)
+        .order('start_time', { ascending: true })
 
       if (error) {
-        console.error('Error fetching time data:', error)
-        return null
+        console.error('Query error:', error)
+        break
       }
 
-      const userHours = timeEntries.reduce((acc: { [key: string]: TimeEntry }, entry) => {
-        console.log('entry', entry)
-        if (!acc[entry.user_id]) {
-          acc[entry.user_id] = {
-            user_id: entry.user_id,
-            user: entry.user as unknown as TimeEntry['user'],
-            confirmed_hours: 0,
-            unconfirmed_hours: 0,
-            activities: []
-          }
-        }
+      if (timeEntries.length > 0) {
+        allTimeEntries = [...allTimeEntries, ...timeEntries as unknown as TimeEntry[]]
+      }
+
+      // Verifica se ci sono altre pagine
+      hasMore = timeEntries.length === PAGE_SIZE
+      currentPage++
+
+      // Log per debugging
+      console.log(`Fetched page ${currentPage}, entries: ${timeEntries.length}`)
+    }
+
+    console.log('Total time entries fetched:', allTimeEntries.length)
+
+    const processedData: UserTimeData[] = activeUsers.map(user => {
+      const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid)
+      
+      const projectMap = new Map<string, ProjectSummary>()
+      let totalBillableHours = 0
+      let totalHours = 0
+      let totalUnassignedHours = 0
+    
+      // Process daily entries with additional metrics
+      const dailyEntriesMap = new Map<number, DailyEntry>()
+      
+      userEntries.forEach(entry => {
         const duration = (entry.end_time - entry.start_time) / 3600000
-        if (entry.completed) {
-          acc[entry.user_id].confirmed_hours += duration
-        } else {
-          acc[entry.user_id].unconfirmed_hours += duration
+        totalHours += duration
+    
+        const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0)
+        if (!dailyEntriesMap.has(dayStart)) {
+          dailyEntriesMap.set(dayStart, {
+            date: dayStart,
+            totalHours: 0,
+            confirmedHours: 0,
+            unconfirmedHours: 0,
+            billablePercentage: 0,
+            unassignedPercentage: 0,
+            projectSummaries: [],
+            isExpanded: false,
+            billableHours: 0,
+          })
         }
-        acc[entry.user_id].activities?.push({
-          title: entry.title,
-          start_time: entry.start_time,
-          end_time: entry.end_time,
-          duration,
-          completed: entry.completed
+    
+        const dailyEntry = dailyEntriesMap.get(dayStart)!
+        dailyEntry.totalHours += duration
+    
+        if (entry.completed) {
+          dailyEntry.confirmedHours += duration
+        } else {
+          dailyEntry.unconfirmedHours += duration
+        }
+    
+        if (entry.project) {
+          const projectId = entry.project.uid
+          const isBillable = !entry.project.not_billable
+          
+          // Update overall project summary
+          if (!projectMap.has(projectId)) {
+            projectMap.set(projectId, {
+              projectId,
+              title: entry.project.title,
+              totalHours: 0,
+              isBillable: isBillable,
+              percentage: 0
+            })
+          }
+          const projectSummary = projectMap.get(projectId)!
+          projectSummary.totalHours += duration
+          
+          // Aggiorna le ore billable totali
+          if (isBillable) {
+            totalBillableHours += duration
+            dailyEntry.billableHours += duration
+          }
+          
+          let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId)
+          if (!dailyProjectSummary) {
+            dailyProjectSummary = {
+              projectId,
+              title: entry.project.title,
+              totalHours: 0,
+              isBillable: isBillable,
+              percentage: 0
+            }
+            dailyEntry.projectSummaries.push(dailyProjectSummary)
+          }
+          dailyProjectSummary.totalHours += duration
+        
+          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100
+        } else {
+          // Aggiorna le ore non assegnate totali
+          totalUnassignedHours += duration
+          dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100
+        }
+    
+        dailyEntry.projectSummaries.forEach(project => {
+          project.percentage = (project.totalHours / dailyEntry.totalHours) * 100
         })
-        return acc
-      }, {})
-      console.log('userhours', userHours)
-
-      // Find users with no time entries
-      const usersWithNoTime = activeUsers.filter(user => 
-        !timeEntries.some(entry => entry.user_id === user.uid)
-      ).map(user => ({
-        nominative: user?.nominative,
-        email: user?.email
-      }))
-
-      const entries = Object.values(userHours)
-      const underTimeUsers = entries.filter(entry => 
-        (entry.confirmed_hours + entry.unconfirmed_hours) < 8
-      ).length
-
+      })
+    
+      projectMap.forEach(project => {
+        project.percentage = totalHours > 0 ? (project.totalHours / totalHours) * 100 : 0
+      })
+    
+      const confirmedHours = userEntries
+        .filter(entry => entry.completed)
+        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+    
+      const unconfirmedHours = userEntries
+        .filter(entry => !entry.completed)
+        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+    
       return {
-        date: day,
-        underTimeUsers,
-        noTimeUsers: usersWithNoTime.length,
-        entries,
-        usersWithNoTime,
+        userId: user.uid,
+        nominative: user.nominative,
+        email: user.email,
+        confirmedHours,
+        unconfirmedHours,
+        billablePercentage: totalHours ? (totalBillableHours / totalHours) * 100 : 0,
+        unassignedPercentage: totalHours ? (totalUnassignedHours / totalHours) * 100 : 0,
+        projectSummaries: Array.from(projectMap.values()),
+        dailyEntries: Array.from(dailyEntriesMap.values()),
         isExpanded: false
       }
     })
 
-    const results = await Promise.all(statsPromises)
-    setTimeStats(results.filter((stat): stat is DayStats => stat !== null))
+    setUserTimeData(processedData)
     setIsLoading(false)
   }
- console.log('timestastt', timeStats)
-  const toggleDayExpansion = (date: Date) => {
-    setTimeStats(prevStats =>
-      prevStats.map(stat =>
-        stat.date.getTime() === date.getTime()
-          ? { ...stat, isExpanded: !stat.isExpanded }
-          : stat
+
+  const toggleUserExpansion = (userId: string) => {
+    setUserTimeData(prevData =>
+      prevData.map(userData =>
+        userData.userId === userId
+          ? { ...userData, isExpanded: !userData.isExpanded }
+          : userData
       )
     )
   }
 
-  const openSidebar = (userData: TimeEntry, date: Date) => {
+  const toggleDailyEntryExpansion = (userData: UserTimeData, date: number) => {
+    setSidebar(prevSidebar => ({
+      ...prevSidebar,
+      userData: prevSidebar.userData ? {
+        ...prevSidebar.userData,
+        dailyEntries: prevSidebar.userData.dailyEntries.map(entry =>
+          entry.date === date
+            ? { ...entry, isExpanded: !entry.isExpanded }
+            : entry
+        )
+      } : null
+    }))
+  }
+
+  const openSidebar = (userData: UserTimeData) => {
     setSidebar({
       isOpen: true,
-      userData,
-      date
+      userData: {
+        ...userData,
+        dailyEntries: userData.dailyEntries.map(entry => ({
+          ...entry,
+          isExpanded: false
+        }))
+      }
     })
   }
 
   const closeSidebar = () => {
     setSidebar({
       isOpen: false,
-      userData: null,
-      date: null
+      userData: null
     })
   }
 
@@ -195,7 +308,7 @@ export default function AdminDashboard() {
       <main className="flex-1 p-8">
         <Card className="p-6">
           <div className="flex justify-between items-center mb-4">
-            <h1 className="text-2xl font-bold">🎯 P&C Check ore</h1>
+            <h1 className="text-2xl font-bold">🎯 Time Tracking Analysis</h1>
           </div>
           
           <div className="space-y-6">
@@ -206,7 +319,7 @@ export default function AdminDashboard() {
                   <Popover>
                     <PopoverTrigger asChild>
                       <Button
-                        variant={"outline"}
+                        variant="outline"
                         className={cn(
                           "w-[240px] justify-start text-left font-normal",
                           !startDate && "text-muted-foreground"
@@ -232,7 +345,7 @@ export default function AdminDashboard() {
                   <Popover>
                     <PopoverTrigger asChild>
                       <Button
-                        variant={"outline"}
+                        variant="outline"
                         className={cn(
                           "w-[240px] justify-start text-left font-normal",
                           !endDate && "text-muted-foreground"
@@ -263,72 +376,127 @@ export default function AdminDashboard() {
               </div>
 
               <div className="space-y-2">
-                {timeStats.map((dayStat) => (
-                  <div key={dayStat.date.toISOString()} className="border rounded-lg">
-                    <div 
-                      className="flex justify-between items-center p-4 cursor-pointer hover:bg-gray-50"
-                      onClick={() => toggleDayExpansion(dayStat.date)}
-                    >
-                      <div className="flex items-center gap-4">
-                        <span className="font-medium">
-                          {format(dayStat.date, 'dd/MM/yyyy')}
-                        </span>
-                        <span className="text-red-500 font-medium">
-                          {dayStat.underTimeUsers || 0} 🤪 under 8 hh
-                        </span>
-                        <span className="text-orange-500 font-medium">
-                          {dayStat.noTimeUsers || 0} 😴 no hours
-                        </span>
+                {userTimeData.map((userData) => (
+                  <div key={userData.userId} className="border rounded-lg">
+                    <div className="flex justify-between items-center p-4">
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="font-medium mr-4">{userData.nominative}</span>
+                            <span className="text-gray-500">{userData.email}</span>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <span className="text-gray-600">
+                              Total: {formatHoursAndMinutes(userData.confirmedHours + userData.unconfirmedHours)}
+                            </span>
+                            
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => openSidebar(userData)}
+                            >
+                              <Clock className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => toggleUserExpansion(userData.userId)}
+                            >
+                              {userData.isExpanded ? <ChevronUp /> : <ChevronDown />}
+                            </Button>
+                          </div>
+                        </div>
                       </div>
-                      {dayStat.isExpanded ? <ChevronUp /> : <ChevronDown />}
                     </div>
 
-                    {dayStat.isExpanded && (
+                    {userData.isExpanded && (
                       <div className="p-4 border-t bg-gray-50">
-                        {dayStat.usersWithNoTime && dayStat.usersWithNoTime.length > 0 && (
-                          <div className="mb-6">
-                            <h3 className="text-lg font-semibold mb-2">Users with No Hours:</h3>
-                            <div className="bg-orange-50 p-4 rounded-lg">
-                              {dayStat.usersWithNoTime.map((user, index) => (
-                                <div key={index} className="mb-2">
-                                  <span className="font-medium">{user?.nominative}</span>
-                                  <span className="text-gray-600 ml-2">({user?.email})</span>
-                                </div>
-                              ))}
+                        <div className="mb-4">
+                          <div className="grid grid-cols-4 gap-4">
+                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                              <div className="text-sm text-gray-500">Unconfirmed</div>
+                              <div className="text-lg font-medium">
+                                {formatHoursAndMinutes(userData.unconfirmedHours)}
+                              </div>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                            <div className="text-sm text-gray-500">Confirmed</div>
+                              <div className="text-lg font-medium">
+                                {formatHoursAndMinutes(userData.confirmedHours)}
+                              </div>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                              <div className="text-sm text-gray-500">Billable %</div>
+                              <div className="text-lg font-medium">
+                                {userData.billablePercentage.toFixed(1)}%
+                              </div>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                              <div className="text-sm text-gray-500">Non-Billable %</div>
+                              <div className="text-lg font-medium">
+                                {(100 - userData.billablePercentage).toFixed(1)}%
+                              </div>
                             </div>
                           </div>
-                        )}
-                        
-                        <table className="min-w-full">
-                          <thead>
-                            <tr className="border-b">
-                              <th className="text-left p-2">User</th>
-                              <th className="text-left p-2">Email</th>
-                              <th className="text-right p-2">Unconfirmed</th>
-                              <th className="text-right p-2">Confirmed</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {dayStat.entries?.map((entry) => (
-                              <tr 
-                                key={entry.user_id}
-                                className={`border-b cursor-pointer transition-colors ${
-                                  entry.confirmed_hours + entry.unconfirmed_hours < 8 ? 'bg-red-50' : ''
-                                } hover:bg-gray-800 hover:text-white`}
-                                onClick={() => openSidebar(entry, dayStat.date)}
+                        </div>
+
+                        <div>
+                          <h3 className="font-medium mb-2">Projects</h3>
+                          <div className="space-y-2">
+                            {userData.projectSummaries.map((project) => (
+                              <div
+                                key={project.projectId}
+                                className="bg-white p-4 rounded-lg shadow-sm"
                               >
-                                <td className="p-2">{entry.user?.nominative}</td>
-                                <td className="p-2">{entry.user?.email}</td>
-                                <td className="p-2 text-right">
-                                  {formatHoursAndMinutes(entry.unconfirmed_hours)}
-                                </td>
-                                <td className="p-2 text-right">
-                                  {formatHoursAndMinutes(entry.confirmed_hours)}
-                                </td>
-                              </tr>
+                                <div className="flex justify-between items-center">
+                                  <div>
+                                    <span className="font-medium">{project.title}</span>
+                                    <span className={`ml-2 text-sm ${
+                                      project.isBillable ? 'text-green-500' : 'text-orange-500'
+                                    }`}>
+                                      {project.isBillable ? 'Billable' : 'Non-billable'}
+                                    </span>
+                                  </div>
+                                  <div className="text-gray-600 flex items-center gap-4">
+                                    <span>{formatHoursAndMinutes(project.totalHours)}</span>
+                                    <span className="text-sm">({project.percentage.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+                                <div className="mt-2 bg-gray-200 rounded-full h-2">
+                                  <div
+                                    className={`h-2 rounded-full ${
+                                      project.isBillable ? 'bg-green-500' : 'bg-orange-500'
+                                    }`}
+                                    style={{ width: `${project.percentage}%` }}
+                                  ></div>
+                                </div>
+                              </div>
                             ))}
-                          </tbody>
-                        </table>
+                            
+                            {userData.unassignedPercentage > 0 && (
+                              <div className="bg-white p-4 rounded-lg shadow-sm border-2 border-dashed border-gray-200">
+                                <div className="flex justify-between items-center">
+                                  <div>
+                                    <span className="font-medium text-gray-500">Unassigned Time</span>
+                                  </div>
+                                  <div className="text-gray-600 flex items-center gap-4">
+                                    <span>{formatHoursAndMinutes(
+                                      (userData.confirmedHours + userData.unconfirmedHours) * 
+                                      (userData.unassignedPercentage / 100)
+                                    )}</span>
+                                    <span className="text-sm">({userData.unassignedPercentage.toFixed(1)}%)</span>
+                                  </div>
+                                </div>
+                                <div className="mt-2 bg-gray-200 rounded-full h-2">
+                                  <div
+                                    className="h-2 rounded-full bg-gray-400"
+                                    style={{ width: `${userData.unassignedPercentage}%` }}
+                                  ></div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -338,48 +506,141 @@ export default function AdminDashboard() {
           </div>
         </Card>
       </main>
-
-      <div className={`fixed inset-y-0 right-0 w-1/2 bg-white shadow-xl transform transition-transform duration-300 ease-in-out ${
+      
+      {sidebar.isOpen && (
+        <div 
+          className="fixed inset-0 bg-black/60 transition-opacity"
+          onClick={closeSidebar}
+        />
+      )}
+      
+      <div className={`fixed inset-y-0 right-0 w-3/4 bg-white shadow-xl transform transition-transform duration-300 ease-in-out ${
         sidebar.isOpen ? 'translate-x-0' : 'translate-x-full'
       }`}>
-        {sidebar.isOpen && sidebar.userData && sidebar.date && (
+        {sidebar.isOpen && sidebar.userData && (
           <div className="h-full p-6 overflow-y-auto">
             <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold">
-                {sidebar.userData.user?.nominative}
-              </h2>
+              <h2 className="text-2xl font-bold">{sidebar.userData.nominative}</h2>
               <Button variant="ghost" size="icon" onClick={closeSidebar}>
                 <X className="h-6 w-6" />
               </Button>
             </div>
-            
-            <div className="mb-4">
-              <p className="text-gray-600">{format(sidebar.date, 'PPPP')}</p>
-              <p className="text-xl font-semibold mt-2">
-                Unconfirmed: {formatHoursAndMinutes(sidebar.userData.unconfirmed_hours)}
-              </p>
-              <p className="text-xl font-semibold mt-2">
-                Confirmed: {formatHoursAndMinutes(sidebar.userData.confirmed_hours)}
-              </p>
-            </div>
 
             <div className="space-y-4">
-              <h3 className="text-lg font-semibold">Activities</h3>
-              {sidebar.userData.activities?.sort((a, b) => a.start_time - b.start_time).map((activity, index) => (
-                <div key={index} className="border rounded-lg p-4 hover:bg-gray-50">
-                  <h4 className="font-medium mb-2">{activity.title}</h4>
-                  <div className="text-sm text-gray-600 space-y-1">
-                    <p>From: {format(activity.start_time, 'HH:mm')}</p>
-                    <p>To: {format(activity.end_time, 'HH:mm')}</p>
-                    <p className="text-sm font-medium">
-                      Duration: {formatHoursAndMinutes(activity.duration)}
-                    </p>
-                    <p className="text-sm font-medium">
-                      Status: {activity.completed ? 'Confirmed' : 'Unconfirmed'}
-                    </p>
+              <h3 className="text-lg font-semibold">Daily Hours</h3>
+              {sidebar.userData.dailyEntries
+                .sort((a, b) => b.date - a.date)
+                .map((entry) => (
+                  <div key={entry.date} className="border rounded-lg hover:bg-gray-50">
+                    <button
+                      className="w-full p-4 flex justify-between items-center"
+                      onClick={() => toggleDailyEntryExpansion(sidebar.userData!, entry.date)}
+                    >
+                      <span className="font-medium">
+                        {format(entry.date, 'EEEE, MMMM d, yyyy')}
+                      </span>
+                      <div className="flex items-center gap-4">
+                        <span className="text-gray-600">
+                          {formatHoursAndMinutes(entry.totalHours)}
+                        </span>
+                        {entry.isExpanded ? <ChevronUp /> : <ChevronDown />}
+                      </div>
+                    </button>
+                    
+                    {entry.isExpanded && (
+                      <div className="p-4 border-t bg-gray-50">
+                        <div className="space-y-4">
+                          <div>
+                            <h4 className="font-medium mb-2">Summary</h4>
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="bg-white p-4 rounded-lg shadow-sm">
+                                <div className="text-sm text-gray-500">Unconfirmed</div>
+                                <div className="text-lg font-medium">
+                                  {formatHoursAndMinutes(entry.unconfirmedHours)}
+                                </div>
+                              </div>
+                              <div className="bg-white p-4 rounded-lg shadow-sm">
+                                <div className="text-sm text-gray-500">Confirmed</div>
+                                <div className="text-lg font-medium">
+                                  {formatHoursAndMinutes(entry.confirmedHours)}
+                                </div>
+                              </div>
+                              <div className="bg-white p-4 rounded-lg shadow-sm">
+                                <div className="text-sm text-gray-500">Billable %</div>
+                                <div className="text-lg font-medium">
+                                  {entry.billablePercentage.toFixed(1)}%
+                                </div>
+                              </div>
+                              <div className="bg-white p-4 rounded-lg shadow-sm">
+                                <div className="text-sm text-gray-500">Non-Billable %</div>
+                                <div className="text-lg font-medium">
+                                  {(100 - entry.billablePercentage).toFixed(1)}%
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div>
+                            <h4 className="font-medium mb-2">Projects</h4>
+                            <div className="space-y-2">
+                              {entry.projectSummaries.map((project) => (
+                                <div
+                                  key={project.projectId}
+                                  className="bg-white p-4 rounded-lg shadow-sm"
+                                >
+                                  <div className="flex justify-between items-center">
+                                    <div>
+                                      <span className="font-medium">{project.title}</span>
+                                      <span className={`ml-2 text-sm ${
+                                        project.isBillable ? 'text-green-500' : 'text-orange-500'
+                                      }`}>
+                                        {project.isBillable ? 'Billable' : 'Non-billable'}
+                                      </span>
+                                    </div>
+                                    <div className="text-gray-600 flex items-center gap-4">
+                                      <span>{formatHoursAndMinutes(project.totalHours)}</span>
+                                      <span className="text-sm">({project.percentage.toFixed(1)}%)</span>
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className={`h-2 rounded-full ${
+                                        project.isBillable ? 'bg-green-500' : 'bg-orange-500'
+                                      }`}
+                                      style={{ width: `${project.percentage}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                              ))}
+
+                              {entry.unassignedPercentage > 0 && (
+                                <div className="bg-white p-4 rounded-lg shadow-sm border-2 border-dashed border-gray-200">
+                                  <div className="flex justify-between items-center">
+                                    <div>
+                                      <span className="font-medium text-gray-500">Unassigned Time</span>
+                                    </div>
+                                    <div className="text-gray-600 flex items-center gap-4">
+                                      <span>{formatHoursAndMinutes(
+                                        entry.totalHours * (entry.unassignedPercentage / 100)
+                                      )}</span>
+                                      <span className="text-sm">({entry.unassignedPercentage.toFixed(1)}%)</span>
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 bg-gray-200 rounded-full h-2">
+                                    <div
+                                      className="h-2 rounded-full bg-gray-400"
+                                      style={{ width: `${entry.unassignedPercentage}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         )}
