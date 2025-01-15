@@ -9,11 +9,20 @@ import { cn } from "@/lib/utils"
 import { format } from 'date-fns'
 import { CalendarIcon, ChevronDown, ChevronUp, X, Clock } from "lucide-react"
 import { supabase } from '@/lib/supabase'
+import { PieChart, Pie, Cell, Tooltip as RechartsTooltip } from 'recharts';
 
 const formatHoursAndMinutes = (hours: number): string => {
   const h = Math.floor(hours)
   const m = Math.round((hours - h) * 60)
   return `${h}h ${m}m`
+}
+
+interface CategorySummary {
+  categoryId: string;
+  name: string;
+  color: string;
+  totalHours: number;
+  percentage: number;
 }
 
 interface ProjectSummary {
@@ -47,6 +56,8 @@ interface UserTimeData {
   projectSummaries: ProjectSummary[]
   dailyEntries: DailyEntry[]
   isExpanded: boolean
+  categorySummaries: CategorySummary[]
+  coveragePercentage: number;
 }
 
 interface SidebarState {
@@ -65,6 +76,11 @@ interface TimeEntry{
       title: string;
       not_billable: boolean;
   };
+  category: {
+    uid: string
+    name: string
+    color: string
+  }
 }
 
 export default function AdminDashboard() {
@@ -79,29 +95,80 @@ export default function AdminDashboard() {
 
   const PAGE_SIZE = 1000
 
+  
+
   const fetchTimeTrackingData = async (start: Date, end: Date) => {
     setIsLoading(true)
+  
+    const calculateExpectedHours = (
+      startDate: Date,
+      endDate: Date,
+      contractType: string,
+      contractualHours: number,
+      contractualHoursByDay: {[k:string]:number}
+    ): number => {
+      let totalExpectedHours = 0;
+      const currentDate = new Date(startDate);
+      
+      while (currentDate <= endDate) {
+        // Se full-time, usa le ore contrattuali divise per i giorni lavorativi
+        if (contractType === 'full-time') {
+          if (currentDate.getDay() !== 0 && currentDate.getDay() !== 6) { // Esclude sabato (6) e domenica (0)
+            totalExpectedHours += contractualHours ; // Dividi le ore settimanali per 5 giorni
+          }
+        } 
+        // Se part-time, usa il JSON delle ore giornaliere
+        else {
+          const dayOfWeek = currentDate.getDay().toString();
+          const hoursForDay = contractualHoursByDay?.[dayOfWeek];
+          if (hoursForDay) {
+            // Converti la stringa in numero se necessario
+            const hours = typeof hoursForDay === 'string' ? parseFloat(hoursForDay) : hoursForDay;
+            if (!isNaN(hours)) {
+              totalExpectedHours += hours;
+            }
+          }
+        }
+        
+        // Passa al giorno successivo
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+      
+      return totalExpectedHours;
+    };
     
     const dayStart = new Date(start)
     dayStart.setHours(0, 0, 0, 0)
     const dayEnd = new Date(end)
     dayEnd.setHours(23, 59, 59, 999)
-
+  
     // Fetch all active users
     const { data: activeUsers, error: userError } = await supabase
       .from('users')
       .select('uid, nominative, email')
       .eq('status', 'active')
-
+  
     if (userError) {
       console.error('Error fetching users:', userError)
       return
     }
-
-    let allTimeEntries: TimeEntry [] = []
+  
+    // 2. Fetch user contracts for the period
+    const { data: contracts, error: contractsError } = await supabase
+      .from('organization_user_contracts')
+      .select('*')
+      .lte('from_date', dayStart.toISOString().split('T')[0])
+      .gte('to_date', dayEnd.toISOString().split('T')[0]);
+  
+    if (contractsError) {
+      console.error('Error fetching contracts:', contractsError);
+      return;
+    }
+  
+    let allTimeEntries: TimeEntry[] = []
     let hasMore = true
     let currentPage = 0
-
+  
     while (hasMore) {
       const { data: timeEntries, error } = await supabase
         .from('time_blocking_events')
@@ -115,6 +182,11 @@ export default function AdminDashboard() {
             uid,
             title,
             not_billable
+          ),
+          category:task_categories (
+            uid,
+            name,
+            color
           )
         `, { count: 'exact' })
         .gte('start_time', dayStart.getTime())
@@ -122,42 +194,65 @@ export default function AdminDashboard() {
         .eq('event_type', 'activity')
         .range(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE - 1)
         .order('start_time', { ascending: true })
-
+  
       if (error) {
         console.error('Query error:', error)
         break
       }
-
+  
       if (timeEntries.length > 0) {
         allTimeEntries = [...allTimeEntries, ...timeEntries as unknown as TimeEntry[]]
       }
-
+  
       // Verifica se ci sono altre pagine
       hasMore = timeEntries.length === PAGE_SIZE
       currentPage++
-
+  
       // Log per debugging
       console.log(`Fetched page ${currentPage}, entries: ${timeEntries.length}`)
     }
-
+  
     console.log('Total time entries fetched:', allTimeEntries.length)
-
+  
     const processedData: UserTimeData[] = activeUsers.map(user => {
-      const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid)
+      const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid);
+      const userContract = contracts.find(c => c.user_id === user.uid);
       
-      const projectMap = new Map<string, ProjectSummary>()
-      let totalBillableHours = 0
-      let totalHours = 0
-      let totalUnassignedHours = 0
+      // Initialize maps and counters
+      const projectMap = new Map<string, ProjectSummary>();
+      const categoryMap = new Map<string, CategorySummary>();
+      let totalBillableHours = 0;
+      let totalHours = 0;
+      let totalUnassignedHours = 0;
+      let uncategorizedHours = 0;
     
       // Process daily entries with additional metrics
-      const dailyEntriesMap = new Map<number, DailyEntry>()
+      const dailyEntriesMap = new Map<number, DailyEntry>();
       
       userEntries.forEach(entry => {
-        const duration = (entry.end_time - entry.start_time) / 3600000
-        totalHours += duration
+        const duration = (entry.end_time - entry.start_time) / 3600000;
+        totalHours += duration;
     
-        const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0)
+        // Process categories
+        if (entry.category) {
+          const categoryId = entry.category.uid;
+          if (!categoryMap.has(categoryId)) {
+            categoryMap.set(categoryId, {
+              categoryId,
+              name: entry.category.name,
+              color: entry.category.color || '#808080', // Fallback color if none specified
+              totalHours: 0,
+              percentage: 0
+            });
+          }
+          const categorySummary = categoryMap.get(categoryId)!;
+          categorySummary.totalHours += duration;
+        } else {
+          uncategorizedHours += duration;
+        }
+    
+        // Process daily entries
+        const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0);
         if (!dailyEntriesMap.has(dayStart)) {
           dailyEntriesMap.set(dayStart, {
             date: dayStart,
@@ -169,21 +264,21 @@ export default function AdminDashboard() {
             projectSummaries: [],
             isExpanded: false,
             billableHours: 0,
-          })
+          });
         }
     
-        const dailyEntry = dailyEntriesMap.get(dayStart)!
-        dailyEntry.totalHours += duration
+        const dailyEntry = dailyEntriesMap.get(dayStart)!;
+        dailyEntry.totalHours += duration;
     
         if (entry.completed) {
-          dailyEntry.confirmedHours += duration
+          dailyEntry.confirmedHours += duration;
         } else {
-          dailyEntry.unconfirmedHours += duration
+          dailyEntry.unconfirmedHours += duration;
         }
     
         if (entry.project) {
-          const projectId = entry.project.uid
-          const isBillable = !entry.project.not_billable
+          const projectId = entry.project.uid;
+          const isBillable = !entry.project.not_billable;
           
           // Update overall project summary
           if (!projectMap.has(projectId)) {
@@ -193,18 +288,18 @@ export default function AdminDashboard() {
               totalHours: 0,
               isBillable: isBillable,
               percentage: 0
-            })
+            });
           }
-          const projectSummary = projectMap.get(projectId)!
-          projectSummary.totalHours += duration
+          const projectSummary = projectMap.get(projectId)!;
+          projectSummary.totalHours += duration;
           
-          // Aggiorna le ore billable totali
+          // Update billable hours
           if (isBillable) {
-            totalBillableHours += duration
-            dailyEntry.billableHours += duration
+            totalBillableHours += duration;
+            dailyEntry.billableHours += duration;
           }
           
-          let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId)
+          let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId);
           if (!dailyProjectSummary) {
             dailyProjectSummary = {
               projectId,
@@ -212,34 +307,63 @@ export default function AdminDashboard() {
               totalHours: 0,
               isBillable: isBillable,
               percentage: 0
-            }
-            dailyEntry.projectSummaries.push(dailyProjectSummary)
+            };
+            dailyEntry.projectSummaries.push(dailyProjectSummary);
           }
-          dailyProjectSummary.totalHours += duration
+          dailyProjectSummary.totalHours += duration;
         
-          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100
+          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100;
         } else {
-          // Aggiorna le ore non assegnate totali
-          totalUnassignedHours += duration
-          dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100
+          // Update unassigned hours
+          totalUnassignedHours += duration;
+          dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100;
         }
     
         dailyEntry.projectSummaries.forEach(project => {
-          project.percentage = (project.totalHours / dailyEntry.totalHours) * 100
-        })
-      })
+          project.percentage = (project.totalHours / dailyEntry.totalHours) * 100;
+        });
+      });
     
+      // Calculate final percentages for projects
       projectMap.forEach(project => {
-        project.percentage = totalHours > 0 ? (project.totalHours / totalHours) * 100 : 0
-      })
+        project.percentage = totalHours > 0 ? (project.totalHours / totalHours) * 100 : 0;
+      });
+    
+      // Calculate percentages for categories
+      categoryMap.forEach(category => {
+        category.percentage = totalHours > 0 ? (category.totalHours / totalHours) * 100 : 0;
+      });
+    
+      // Add uncategorized if there are any
+      let categorySummaries = Array.from(categoryMap.values());
+      if (uncategorizedHours > 0) {
+        categorySummaries.push({
+          categoryId: 'uncategorized',
+          name: 'Uncategorized',
+          color: '#E0E0E0',
+          totalHours: uncategorizedHours,
+          percentage: totalHours > 0 ? (uncategorizedHours / totalHours) * 100 : 0
+        });
+      }
+      // Sort categories by total hours
+      categorySummaries = categorySummaries.sort((a, b) => b.totalHours - a.totalHours);
+    
+      // Calculate expected hours based on contract
+      const expectedHours = userContract ? calculateExpectedHours(
+        dayStart,
+        dayEnd,
+        userContract.contract_type,
+        userContract.contractual_hours,
+        userContract.contractual_hours_by_day
+      ) : 0;
     
       const confirmedHours = userEntries
         .filter(entry => entry.completed)
-        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0);
     
       const unconfirmedHours = userEntries
         .filter(entry => !entry.completed)
-        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0);
     
       return {
         userId: user.uid,
@@ -250,13 +374,20 @@ export default function AdminDashboard() {
         billablePercentage: totalHours ? (totalBillableHours / totalHours) * 100 : 0,
         unassignedPercentage: totalHours ? (totalUnassignedHours / totalHours) * 100 : 0,
         projectSummaries: Array.from(projectMap.values()),
+        categorySummaries,
         dailyEntries: Array.from(dailyEntriesMap.values()),
+        coveragePercentage: expectedHours > 0 ? (totalHours / expectedHours) * 100 : 0,
         isExpanded: false
-      }
-    })
-
-    setUserTimeData(processedData)
-    setIsLoading(false)
+      };
+    });
+  
+    // Sort the processed data alphabetically by nominative
+    const sortedData = processedData.sort((a, b) => 
+      a.nominative.localeCompare(b.nominative)
+    );
+    
+    setUserTimeData(sortedData);
+    setIsLoading(false);
   }
 
   const toggleUserExpansion = (userId: string) => {
@@ -410,7 +541,10 @@ export default function AdminDashboard() {
                     </div>
 
                     {userData.isExpanded && (
+                      
                       <div className="p-4 border-t bg-gray-50">
+
+                        {/* KPI */}
                         <div className="mb-4">
                           <div className="grid grid-cols-4 gap-4">
                             <div className="bg-white p-4 rounded-lg shadow-sm">
@@ -437,8 +571,85 @@ export default function AdminDashboard() {
                                 {(100 - userData.billablePercentage).toFixed(1)}%
                               </div>
                             </div>
+                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                              <div className="text-sm text-gray-500">Coverage %</div>
+                              <div className="text-lg font-medium">
+                                {userData.coveragePercentage.toFixed(1)}%
+                              </div>
+                            </div>
                           </div>
                         </div>
+
+                        
+
+                        {/* grafico a torta */}
+                        <div className="mb-4">
+                          <h3 className="font-medium mb-2">Time by Category</h3>
+                          <div className="bg-white p-4 rounded-lg shadow-sm">
+                            <div className="flex items-start justify-between">
+                              <div className="flex-shrink-0">
+                                <PieChart width={300} height={300}>
+                                  <Pie
+                                    data={userData.categorySummaries}
+                                    dataKey="totalHours"
+                                    nameKey="name"
+                                    cx="50%"
+                                    cy="50%"
+                                    outerRadius={100}
+                                    innerRadius={60}
+                                    paddingAngle={2}
+                                  >
+                                    {userData.categorySummaries.map((category) => (
+                                      <Cell key={category.categoryId} fill={category.color} />
+                                    ))}
+                                  </Pie>
+                                  <RechartsTooltip
+                                    content={({ active, payload }) => {
+                                      if (active && payload && payload.length) {
+                                        const data = payload[0].payload;
+                                        return (
+                                          <div className="bg-white p-2 shadow rounded border">
+                                            <p className="font-medium">{data.name}</p>
+                                            <p className="text-sm text-gray-600">
+                                              {formatHoursAndMinutes(data.totalHours)}
+                                              {' '}({data.percentage.toFixed(1)}%)
+                                            </p>
+                                          </div>
+                                        );
+                                      }
+                                      return null;
+                                    }}
+                                  />
+                                </PieChart>
+                              </div>
+                              
+                              <div className="flex-1 ml-8">
+                                <div className="max-h-[300px] overflow-y-auto pr-2">
+                                  <div className="grid grid-cols-1 gap-3">
+                                    {userData.categorySummaries.map((category) => (
+                                      <div 
+                                        key={category.categoryId} 
+                                        className="flex items-center gap-2 border rounded p-2 hover:bg-gray-50"
+                                      >
+                                        <div 
+                                          className="w-4 h-4 rounded-full flex-shrink-0" 
+                                          style={{ backgroundColor: category.color }}
+                                        />
+                                        <div className="flex-1">
+                                          <div className="font-medium">{category.name}</div>
+                                          <div className="text-sm text-gray-500">
+                                            {formatHoursAndMinutes(category.totalHours)} • {category.percentage.toFixed(1)}%
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
 
                         <div>
                           <h3 className="font-medium mb-2">Projects</h3>
