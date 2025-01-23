@@ -57,7 +57,8 @@ interface UserTimeData {
   dailyEntries: DailyEntry[]
   isExpanded: boolean
   categorySummaries: CategorySummary[]
-  coveragePercentage: number;
+  coveragePercentage: number
+  coverageData?: CoverageData;
 }
 
 interface SidebarState {
@@ -83,6 +84,20 @@ interface TimeEntry{
   }
 }
 
+interface DailyCoverage {
+  date: string;
+  expectedHours: number;
+  actualHours: number;
+  coverage: number;
+}
+
+interface CoverageData {
+  dailyCoverage: DailyCoverage[];
+  overallCoverage: number;
+  totalExpectedHours: number;
+  totalActualHours: number;
+}
+
 export default function AdminDashboard() {
   const [startDate, setStartDate] = useState<Date | undefined>(new Date(new Date().getFullYear(), new Date().getMonth(), 1))
   const [endDate, setEndDate] = useState<Date | undefined>(new Date())
@@ -93,301 +108,276 @@ export default function AdminDashboard() {
     userData: null
   })
 
-  const PAGE_SIZE = 1000
+  
 
   
 
   const fetchTimeTrackingData = async (start: Date, end: Date) => {
     setIsLoading(true)
   
-    const calculateExpectedHours = (
-      startDate: Date,
-      endDate: Date,
-      contractType: string,
-      contractualHours: number,
-      contractualHoursByDay: {[k:string]:number}
-    ): number => {
-      let totalExpectedHours = 0;
-      const currentDate = new Date(startDate);
+    try {
+      const dayStart = new Date(start)
+      dayStart.setHours(0, 0, 0, 0)
+      const dayEnd = new Date(end)
+      dayEnd.setHours(23, 59, 59, 999)
+  
+      // 1. Fetch all active users
+      const { data: activeUsers, error: userError } = await supabase
+        .from('users')
+        .select('uid, nominative, email')
+        .eq('status', 'active')
+  
+      if (userError) {
+        console.error('Error fetching users:', userError)
+        return
+      }
+  
+      // 2. Fetch coverage data for all users in parallel
+      const coveragePromises = activeUsers.map(async (user) => {
+        try {
+          const response = await fetch(`${window.location.origin}/api/coverage`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              startDate: dayStart.toISOString().split('T')[0],
+              endDate: dayEnd.toISOString().split('T')[0],
+              userId: user.uid
+            }),
+          })
       
-      while (currentDate <= endDate) {
-        // Se full-time, usa le ore contrattuali divise per i giorni lavorativi
-        if (contractType === 'full-time') {
-          if (currentDate.getDay() !== 0 && currentDate.getDay() !== 6) { // Esclude sabato (6) e domenica (0)
-            totalExpectedHours += contractualHours ; // Dividi le ore settimanali per 5 giorni
+          if (!response.ok) {
+            console.error('Coverage API error for user:', user.uid, await response.text())
+            return { userId: user.uid, coverageData: null }
           }
-        } 
-        // Se part-time, usa il JSON delle ore giornaliere
-        else {
-          const dayOfWeek = currentDate.getDay().toString();
-          const hoursForDay = contractualHoursByDay?.[dayOfWeek];
-          if (hoursForDay) {
-            // Converti la stringa in numero se necessario
-            const hours = typeof hoursForDay === 'string' ? parseFloat(hoursForDay) : hoursForDay;
-            if (!isNaN(hours)) {
-              totalExpectedHours += hours;
+          
+          const data = await response.json()
+          return {
+            userId: user.uid,
+            coverageData: data
+          }
+        } catch (error) {
+          console.error('Coverage request error for user:', user.uid, error)
+          return { userId: user.uid, coverageData: null }
+        }
+      })
+  
+      // 3. Fetch all time entries in paginated form
+      let allTimeEntries: TimeEntry[] = []
+      let hasMore = true
+      let currentPage = 0
+      const PAGE_SIZE = 1000
+  
+      while (hasMore) {
+        const { data: timeEntries, error } = await supabase
+          .from('time_blocking_events')
+          .select(`
+            uid,
+            user_id,
+            start_time,
+            end_time,
+            completed,
+            project:projects (
+              uid,
+              title,
+              not_billable
+            ),
+            category:task_categories (
+              uid,
+              name,
+              color
+            )
+          `)
+          .gte('start_time', dayStart.getTime())
+          .lte('end_time', dayEnd.getTime())
+          .eq('event_type', 'activity')
+          .range(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE - 1)
+          .order('start_time', { ascending: true })
+  
+        if (error) {
+          console.error('Query error:', error)
+          break
+        }
+  
+        if (timeEntries.length > 0) {
+          allTimeEntries = [...allTimeEntries, ...timeEntries as unknown as TimeEntry[]]
+        }
+  
+        hasMore = timeEntries.length === PAGE_SIZE
+        currentPage++
+      }
+  
+      // 4. Wait for coverage data
+      const coverageResults = await Promise.all(coveragePromises)
+  
+      // 5. Process data for each user
+      const processedData: UserTimeData[] = activeUsers.map(user => {
+        const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid)
+        const userCoverage = coverageResults.find(cr => cr.userId === user.uid)
+        
+        // Initialize maps for aggregation
+        const projectMap = new Map<string, ProjectSummary>()
+        const categoryMap = new Map<string, CategorySummary>()
+        const dailyEntriesMap = new Map<number, DailyEntry>()
+        
+        // Tracking totals
+        let totalBillableHours = 0
+        let totalHours = 0
+        let totalUnassignedHours = 0
+        let uncategorizedHours = 0
+  
+        // Process each time entry
+        userEntries.forEach(entry => {
+          const duration = (entry.end_time - entry.start_time) / 3600000
+          totalHours += duration
+  
+          // Process categories
+          if (entry.category) {
+            const categoryId = entry.category.uid
+            if (!categoryMap.has(categoryId)) {
+              categoryMap.set(categoryId, {
+                categoryId,
+                name: entry.category.name,
+                color: entry.category.color || '#808080',
+                totalHours: 0,
+                percentage: 0
+              })
             }
+            const categorySummary = categoryMap.get(categoryId)!
+            categorySummary.totalHours += duration
+          } else {
+            uncategorizedHours += duration
           }
-        }
-        
-        // Passa al giorno successivo
-        currentDate.setDate(currentDate.getDate() + 1);
-      }
-      
-      return totalExpectedHours;
-    };
-    
-    const dayStart = new Date(start)
-    dayStart.setHours(0, 0, 0, 0)
-    const dayEnd = new Date(end)
-    dayEnd.setHours(23, 59, 59, 999)
   
-    // Fetch all active users
-    const { data: activeUsers, error: userError } = await supabase
-      .from('users')
-      .select('uid, nominative, email')
-      .eq('status', 'active')
-  
-    if (userError) {
-      console.error('Error fetching users:', userError)
-      return
-    }
-  
-    // 2. Fetch user contracts for the period
-    const { data: contracts, error: contractsError } = await supabase
-      .from('organization_user_contracts')
-      .select('*')
-      .lte('from_date', dayStart.toISOString().split('T')[0])
-      .gte('to_date', dayEnd.toISOString().split('T')[0]);
-  
-    if (contractsError) {
-      console.error('Error fetching contracts:', contractsError);
-      return;
-    }
-  
-    let allTimeEntries: TimeEntry[] = []
-    let hasMore = true
-    let currentPage = 0
-  
-    while (hasMore) {
-      const { data: timeEntries, error } = await supabase
-        .from('time_blocking_events')
-        .select(`
-          uid,
-          user_id,
-          start_time,
-          end_time,
-          completed,
-          project:projects (
-            uid,
-            title,
-            not_billable
-          ),
-          category:task_categories (
-            uid,
-            name,
-            color
-          )
-        `, { count: 'exact' })
-        .gte('start_time', dayStart.getTime())
-        .lte('end_time', dayEnd.getTime())
-        .eq('event_type', 'activity')
-        .range(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE - 1)
-        .order('start_time', { ascending: true })
-  
-      if (error) {
-        console.error('Query error:', error)
-        break
-      }
-  
-      if (timeEntries.length > 0) {
-        allTimeEntries = [...allTimeEntries, ...timeEntries as unknown as TimeEntry[]]
-      }
-  
-      // Verifica se ci sono altre pagine
-      hasMore = timeEntries.length === PAGE_SIZE
-      currentPage++
-  
-      // Log per debugging
-      console.log(`Fetched page ${currentPage}, entries: ${timeEntries.length}`)
-    }
-  
-    console.log('Total time entries fetched:', allTimeEntries.length)
-  
-    const processedData: UserTimeData[] = activeUsers.map(user => {
-      const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid);
-      const userContract = contracts.find(c => c.user_id === user.uid);
-      
-      // Initialize maps and counters
-      const projectMap = new Map<string, ProjectSummary>();
-      const categoryMap = new Map<string, CategorySummary>();
-      let totalBillableHours = 0;
-      let totalHours = 0;
-      let totalUnassignedHours = 0;
-      let uncategorizedHours = 0;
-    
-      // Process daily entries with additional metrics
-      const dailyEntriesMap = new Map<number, DailyEntry>();
-      
-      userEntries.forEach(entry => {
-        const duration = (entry.end_time - entry.start_time) / 3600000;
-        totalHours += duration;
-    
-        // Process categories
-        if (entry.category) {
-          const categoryId = entry.category.uid;
-          if (!categoryMap.has(categoryId)) {
-            categoryMap.set(categoryId, {
-              categoryId,
-              name: entry.category.name,
-              color: entry.category.color || '#808080', // Fallback color if none specified
+          // Process daily entries
+          const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0)
+          if (!dailyEntriesMap.has(dayStart)) {
+            dailyEntriesMap.set(dayStart, {
+              date: dayStart,
               totalHours: 0,
-              percentage: 0
-            });
+              confirmedHours: 0,
+              unconfirmedHours: 0,
+              billablePercentage: 0,
+              unassignedPercentage: 0,
+              projectSummaries: [],
+              billableHours: 0
+            })
           }
-          const categorySummary = categoryMap.get(categoryId)!;
-          categorySummary.totalHours += duration;
-        } else {
-          uncategorizedHours += duration;
-        }
-    
-        // Process daily entries
-        const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0);
-        if (!dailyEntriesMap.has(dayStart)) {
-          dailyEntriesMap.set(dayStart, {
-            date: dayStart,
-            totalHours: 0,
-            confirmedHours: 0,
-            unconfirmedHours: 0,
-            billablePercentage: 0,
-            unassignedPercentage: 0,
-            projectSummaries: [],
-            isExpanded: false,
-            billableHours: 0,
-          });
-        }
-    
-        const dailyEntry = dailyEntriesMap.get(dayStart)!;
-        dailyEntry.totalHours += duration;
-    
-        if (entry.completed) {
-          dailyEntry.confirmedHours += duration;
-        } else {
-          dailyEntry.unconfirmedHours += duration;
-        }
-    
-        if (entry.project) {
-          const projectId = entry.project.uid;
-          const isBillable = !entry.project.not_billable;
-          
-          // Update overall project summary
-          if (!projectMap.has(projectId)) {
-            projectMap.set(projectId, {
-              projectId,
-              title: entry.project.title,
-              totalHours: 0,
-              isBillable: isBillable,
-              percentage: 0
-            });
-          }
-          const projectSummary = projectMap.get(projectId)!;
-          projectSummary.totalHours += duration;
-          
-          // Update billable hours
-          if (isBillable) {
-            totalBillableHours += duration;
-            dailyEntry.billableHours += duration;
-          }
-          
-          let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId);
-          if (!dailyProjectSummary) {
-            dailyProjectSummary = {
-              projectId,
-              title: entry.project.title,
-              totalHours: 0,
-              isBillable: isBillable,
-              percentage: 0
-            };
-            dailyEntry.projectSummaries.push(dailyProjectSummary);
-          }
-          dailyProjectSummary.totalHours += duration;
-        
-          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100;
-        } else {
-          // Update unassigned hours
-          totalUnassignedHours += duration;
-          dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100;
-        }
-    
-        dailyEntry.projectSummaries.forEach(project => {
-          project.percentage = (project.totalHours / dailyEntry.totalHours) * 100;
-        });
-      });
-    
-      // Calculate final percentages for projects
-      projectMap.forEach(project => {
-        project.percentage = totalHours > 0 ? (project.totalHours / totalHours) * 100 : 0;
-      });
-    
-      // Calculate percentages for categories
-      categoryMap.forEach(category => {
-        category.percentage = totalHours > 0 ? (category.totalHours / totalHours) * 100 : 0;
-      });
-    
-      // Add uncategorized if there are any
-      let categorySummaries = Array.from(categoryMap.values());
-      if (uncategorizedHours > 0) {
-        categorySummaries.push({
-          categoryId: 'uncategorized',
-          name: 'Uncategorized',
-          color: '#E0E0E0',
-          totalHours: uncategorizedHours,
-          percentage: totalHours > 0 ? (uncategorizedHours / totalHours) * 100 : 0
-        });
-      }
-      // Sort categories by total hours
-      categorySummaries = categorySummaries.sort((a, b) => b.totalHours - a.totalHours);
-    
-      // Calculate expected hours based on contract
-      const expectedHours = userContract ? calculateExpectedHours(
-        dayStart,
-        dayEnd,
-        userContract.contract_type,
-        userContract.contractual_hours,
-        userContract.contractual_hours_by_day
-      ) : 0;
-    
-      const confirmedHours = userEntries
-        .filter(entry => entry.completed)
-        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0);
-    
-      const unconfirmedHours = userEntries
-        .filter(entry => !entry.completed)
-        .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0);
-    
-      return {
-        userId: user.uid,
-        nominative: user.nominative,
-        email: user.email,
-        confirmedHours,
-        unconfirmedHours,
-        billablePercentage: totalHours ? (totalBillableHours / totalHours) * 100 : 0,
-        unassignedPercentage: totalHours ? (totalUnassignedHours / totalHours) * 100 : 0,
-        projectSummaries: Array.from(projectMap.values()),
-        categorySummaries,
-        dailyEntries: Array.from(dailyEntriesMap.values()),
-        coveragePercentage: expectedHours > 0 ? (totalHours / expectedHours) * 100 : 0,
-        isExpanded: false
-      };
-    });
   
-    // Sort the processed data alphabetically by nominative
-    const sortedData = processedData.sort((a, b) => 
-      a.nominative.localeCompare(b.nominative)
-    );
-    
-    setUserTimeData(sortedData);
-    setIsLoading(false);
+          const dailyEntry = dailyEntriesMap.get(dayStart)!
+          dailyEntry.totalHours += duration
+  
+          if (entry.completed) {
+            dailyEntry.confirmedHours += duration
+          } else {
+            dailyEntry.unconfirmedHours += duration
+          }
+  
+          // Process projects
+          if (entry.project) {
+            const projectId = entry.project.uid
+            const isBillable = !entry.project.not_billable
+  
+            if (!projectMap.has(projectId)) {
+              projectMap.set(projectId, {
+                projectId,
+                title: entry.project.title,
+                totalHours: 0,
+                isBillable,
+                percentage: 0
+              })
+            }
+            const projectSummary = projectMap.get(projectId)!
+            projectSummary.totalHours += duration
+  
+            if (isBillable) {
+              totalBillableHours += duration
+              dailyEntry.billableHours += duration
+            }
+  
+            let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId)
+            if (!dailyProjectSummary) {
+              dailyProjectSummary = {
+                projectId,
+                title: entry.project.title,
+                totalHours: 0,
+                isBillable,
+                percentage: 0
+              }
+              dailyEntry.projectSummaries.push(dailyProjectSummary)
+            }
+            dailyProjectSummary.totalHours += duration
+          } else {
+            totalUnassignedHours += duration
+            dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100
+          }
+  
+          // Update daily percentages
+          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100
+          dailyEntry.projectSummaries.forEach(project => {
+            project.percentage = (project.totalHours / dailyEntry.totalHours) * 100
+          })
+        })
+  
+        // Calculate final percentages
+        projectMap.forEach(project => {
+          project.percentage = (project.totalHours / totalHours) * 100
+        })
+  
+        categoryMap.forEach(category => {
+          category.percentage = (category.totalHours / totalHours) * 100
+        })
+  
+        // Process category summaries
+        let categorySummaries = Array.from(categoryMap.values())
+        if (uncategorizedHours > 0) {
+          categorySummaries.push({
+            categoryId: 'uncategorized',
+            name: 'Uncategorized',
+            color: '#E0E0E0',
+            totalHours: uncategorizedHours,
+            percentage: (uncategorizedHours / totalHours) * 100
+          })
+        }
+        categorySummaries = categorySummaries.sort((a, b) => b.totalHours - a.totalHours)
+  
+        const confirmedHours = userEntries
+          .filter(entry => entry.completed)
+          .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+  
+        const unconfirmedHours = userEntries
+          .filter(entry => !entry.completed)
+          .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
+  
+        return {
+          userId: user.uid,
+          nominative: user.nominative,
+          email: user.email,
+          confirmedHours,
+          unconfirmedHours,
+          billablePercentage: totalHours ? (totalBillableHours / totalHours) * 100 : 0,
+          unassignedPercentage: totalHours ? (totalUnassignedHours / totalHours) * 100 : 0,
+          projectSummaries: Array.from(projectMap.values()),
+          categorySummaries,
+          dailyEntries: Array.from(dailyEntriesMap.values()),
+          coverageData: userCoverage?.coverageData,
+          coveragePercentage: userCoverage?.coverageData?.overallCoverage || 0,
+          isExpanded: false
+        }
+      })
+  
+      // Sort users alphabetically by nominative
+      const sortedData = processedData.sort((a, b) => 
+        a.nominative.localeCompare(b.nominative)
+      )
+  
+      setUserTimeData(sortedData)
+    } catch (error) {
+      console.error('Error processing data:', error)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   const toggleUserExpansion = (userId: string) => {
@@ -439,7 +429,7 @@ export default function AdminDashboard() {
       <main className="flex-1 p-8">
         <Card className="p-6">
           <div className="flex justify-between items-center mb-4">
-            <h1 className="text-2xl font-bold">🎯 Time Tracking Analysis</h1>
+            <h1 className="text-2xl font-bold">⏱ Time Analysis</h1>
           </div>
           
           <div className="space-y-6">

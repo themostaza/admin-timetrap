@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronLeft, Users, Settings, LogOut, FileText, FileClock } from 'lucide-react';
+import { ChevronLeft, Users, Settings, LogOut, FileClock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 interface SidebarProps {
@@ -19,19 +19,15 @@ const Sidebar = ({ isCollapsed, setIsCollapsed }: SidebarProps) => {
 
   const navItems = [
     { 
-      name: 'Check ore P&C', 
+      name: 'time analysys', 
       icon: <FileClock className="h-5 w-5" />,  
-      href: '/admin/pandccheck' 
+      href: '/admin/analysis' 
     },
+    
     { 
-      name: 'Check progetti', 
-      icon: <FileText className="h-5 w-5" />,  
-      href: '/admin/projects' 
-    },
-    { 
-      name: 'Impostazioni', 
+      name: 'working calendar', 
       icon: <Settings className="h-5 w-5" />,  
-      href: '/settings' 
+      href: '/admin/working-calendar' 
     }
   ];
 
