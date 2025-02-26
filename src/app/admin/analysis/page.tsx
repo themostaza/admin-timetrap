@@ -564,7 +564,7 @@ export default function AdminDashboard() {
                             <div className="bg-white p-4 rounded-lg shadow-sm">
                               <div className="text-sm text-gray-500">Coverage %</div>
                               <div className="text-lg font-medium">
-                                {userData.coveragePercentage.toFixed(1)}%
+                                {userData.coveragePercentage.toFixed(1)}% [{userData.coverageData?.totalActualHours}/{userData.coverageData?.totalExpectedHours}]
                               </div>
                             </div>
                           </div>

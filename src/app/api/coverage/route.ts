@@ -79,6 +79,10 @@ export async function POST(request: Request) {
       contractualHours: contract.contractual_hours,
       contractualHoursByDay: contract.contractual_hours_by_day
     })
+
+    const extendedEndDate = new Date(endDate);
+      extendedEndDate.setDate(extendedEndDate.getDate() + 1);
+      extendedEndDate.setHours(0, 0, 0, 0);
     
     // Fetch time entries
     const { data: timeEntries, error: timeError } = await supabase
@@ -87,7 +91,7 @@ export async function POST(request: Request) {
       .eq('user_id', userId)
       .eq('event_type', 'activity')
       .gte('start_time', new Date(startDate).getTime())
-      .lte('end_time', new Date(endDate).getTime())
+      .lt('end_time', extendedEndDate.getTime())
 
     if (timeError) {
       console.error('Time entries fetch error:', timeError)
@@ -174,7 +178,9 @@ export async function POST(request: Request) {
 
     // Calculate overall coverage
     const totalExpectedHours = dailyCoverage.reduce((sum, day) => sum + day.expectedHours, 0)
-    const totalActualHours = dailyCoverage.reduce((sum, day) => sum + day.actualHours, 0)
+    const totalActualHours = timeEntries?.reduce((sum, entry) => 
+      sum + ((entry.end_time) - entry.start_time) / 3600000, 0
+    ) || 0  
     const overallCoverage = totalExpectedHours > 0 ? 
       (totalActualHours / totalExpectedHours) * 100 : 0
 
