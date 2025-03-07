@@ -90,6 +90,7 @@ export async function POST(request: Request) {
       .select('start_time, end_time')
       .eq('user_id', userId)
       .eq('event_type', 'activity')
+      .eq('completed', true)
       .gte('start_time', new Date(startDate).getTime())
       .lt('end_time', extendedEndDate.getTime())
 

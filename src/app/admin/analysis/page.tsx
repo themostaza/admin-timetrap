@@ -116,10 +116,8 @@ export default function AdminDashboard() {
     setIsLoading(true)
   
     try {
-      const dayStart = new Date(start)
-      dayStart.setHours(0, 0, 0, 0)
-      const dayEnd = new Date(end)
-      dayEnd.setHours(23, 59, 59, 999)
+      const dayStart = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0))
+      const dayEnd = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999))
   
       // 1. Fetch all active users
       const { data: activeUsers, error: userError } = await supabase
@@ -251,10 +249,17 @@ export default function AdminDashboard() {
           }
   
           // Process daily entries
-          const dayStart = new Date(entry.start_time).setHours(0, 0, 0, 0)
-          if (!dailyEntriesMap.has(dayStart)) {
-            dailyEntriesMap.set(dayStart, {
-              date: dayStart,
+          const entryDate = new Date(entry.start_time)
+          const dayStartUTC = Date.UTC(
+            entryDate.getUTCFullYear(),
+            entryDate.getUTCMonth(),
+            entryDate.getUTCDate(),
+            0, 0, 0, 0
+          )
+
+          if (!dailyEntriesMap.has(dayStartUTC)) {
+            dailyEntriesMap.set(dayStartUTC, {
+              date: dayStartUTC,
               totalHours: 0,
               confirmedHours: 0,
               unconfirmedHours: 0,
@@ -264,8 +269,8 @@ export default function AdminDashboard() {
               billableHours: 0
             })
           }
-  
-          const dailyEntry = dailyEntriesMap.get(dayStart)!
+
+          const dailyEntry = dailyEntriesMap.get(dayStartUTC)!
           dailyEntry.totalHours += duration
   
           if (entry.completed) {
@@ -508,7 +513,7 @@ export default function AdminDashboard() {
                           </div>
                           <div className="flex items-center gap-4">
                             <span className="text-gray-600">
-                              Total: {formatHoursAndMinutes(userData.confirmedHours + userData.unconfirmedHours)}
+                              Total: {formatHoursAndMinutes(userData.unconfirmedHours + userData.confirmedHours)}
                             </span>
                             
                             <Button
