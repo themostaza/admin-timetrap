@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronLeft, Users, Settings, LogOut, FileClock } from 'lucide-react';
+import { ChevronLeft, Users, Settings, LogOut, FileClock, FolderKanban } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 interface SidebarProps {
@@ -18,6 +18,11 @@ const Sidebar = ({ isCollapsed, setIsCollapsed }: SidebarProps) => {
   };
 
   const navItems = [
+    { 
+      name: 'projects', 
+      icon: <FolderKanban className="h-5 w-5" />,  
+      href: '/dashboard/projects' 
+    },
     { 
       name: 'time analysys', 
       icon: <FileClock className="h-5 w-5" />,  

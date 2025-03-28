@@ -10,10 +10,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import { CalendarIcon, Plus, Trash2 } from "lucide-react"
+import { CalendarIcon, Plus, Trash2, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { supabase } from '@/lib/supabase'
 import _ from 'lodash'
+import { toast } from "sonner"
 
 interface WorkingDay {
   id: number
@@ -23,18 +24,19 @@ interface WorkingDay {
   organization_id: string | null
 }
 
-// Definizione della funzione debounced fuori dal componente
+// Reduce debounce time for better responsiveness
 const debouncedUpdate = _.debounce((
   dayId: number, 
   description: string, 
   updateFn: (id: number, updates: Partial<WorkingDay>) => Promise<void>
 ) => {
   updateFn(dayId, { description });
-}, 500);
+}, 300);
 
 export default function WorkingCalendar() {
   const [workingDays, setWorkingDays] = useState<WorkingDay[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [updatingIds, setUpdatingIds] = useState<number[]>([])
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(new Date())
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [formData, setFormData] = useState({
@@ -66,6 +68,7 @@ export default function WorkingCalendar() {
 
   const handleAdd = async () => {
     try {
+      setIsLoading(true)
       const { error } = await supabase
         .from('working_days_calendar')
         .insert([{
@@ -83,13 +86,18 @@ export default function WorkingCalendar() {
         is_working_day: true,
         description: ''
       })
+      toast.success('Day added successfully')
     } catch (error) {
       console.error('Error adding working day:', error)
+      toast.error('Failed to add day')
+    } finally {
+      setIsLoading(false)
     }
   }
 
   const handleUpdate = async (dayId: number, updates: Partial<WorkingDay>) => {
     try {
+      setUpdatingIds(prev => [...prev, dayId])
       const { error } = await supabase
         .from('working_days_calendar')
         .update(updates)
@@ -102,8 +110,12 @@ export default function WorkingCalendar() {
           day.id === dayId ? { ...day, ...updates } : day
         )
       )
+      toast.success('Day updated successfully')
     } catch (error) {
       console.error('Error updating working day:', error)
+      toast.error('Failed to update day')
+    } finally {
+      setUpdatingIds(prev => prev.filter(id => id !== dayId))
     }
   }
 
@@ -122,6 +134,7 @@ export default function WorkingCalendar() {
 
   const handleDelete = async (id: number) => {
     try {
+      setUpdatingIds(prev => [...prev, id])
       const { error } = await supabase
         .from('working_days_calendar')
         .delete()
@@ -130,8 +143,12 @@ export default function WorkingCalendar() {
       if (error) throw error
       
       await fetchWorkingDays()
+      toast.success('Day deleted successfully')
     } catch (error) {
       console.error('Error deleting working day:', error)
+      toast.error('Failed to delete day')
+    } finally {
+      setUpdatingIds(prev => prev.filter(dayId => dayId !== id))
     }
   }
 
@@ -212,8 +229,16 @@ export default function WorkingCalendar() {
                   <Button 
                     className="w-full"
                     onClick={handleAdd}
+                    disabled={isLoading}
                   >
-                    Add Day
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Adding...
+                      </>
+                    ) : (
+                      'Add Day'
+                    )}
                   </Button>
                 </div>
               </DialogContent>
@@ -222,7 +247,9 @@ export default function WorkingCalendar() {
 
           <div className="space-y-4">
             {isLoading ? (
-              <div className="text-center py-4">Loading...</div>
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
             ) : (
               workingDays.map((day) => (
                 <Card key={day.id} className="p-4">
@@ -238,6 +265,7 @@ export default function WorkingCalendar() {
                             onCheckedChange={(checked) => 
                               handleUpdate(day.id, { is_working_day: checked })
                             }
+                            disabled={updatingIds.includes(day.id)}
                           />
                           <span className={cn(
                             "text-sm",
@@ -252,6 +280,7 @@ export default function WorkingCalendar() {
                         onChange={(e) => handleDescriptionChange(day.id, e.target.value)}
                         placeholder="Add notes..."
                         className="mt-2 resize-none"
+                        disabled={updatingIds.includes(day.id)}
                       />
                     </div>
                     <Button
@@ -259,8 +288,13 @@ export default function WorkingCalendar() {
                       size="icon"
                       className="ml-4"
                       onClick={() => handleDelete(day.id)}
+                      disabled={updatingIds.includes(day.id)}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      {updatingIds.includes(day.id) ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
                     </Button>
                   </div>
                 </Card>

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Sidebar from '@/components/sidebar'
+import { Toaster } from 'sonner'
 
 export default function RootLayoutClient({
   children,
@@ -24,9 +25,13 @@ export default function RootLayoutClient({
 
   // Se la pagina è nella lista delle escluse, mostra solo il contenuto
   if (shouldHideMenu) {
-    return children
+    return (
+      <>
+        {children}
+        <Toaster />
+      </>
+    )
   }
-
 
   return (
     <div className="flex min-h-screen">
@@ -34,6 +39,7 @@ export default function RootLayoutClient({
       <main className={`${isCollapsed ? 'ml-16' : 'ml-64'} transition-all duration-300 flex-1`}>
         {children}
       </main>
+      <Toaster />
     </div>
   )
 }
