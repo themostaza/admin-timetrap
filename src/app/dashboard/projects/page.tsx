@@ -17,15 +17,24 @@ interface CategoryStats {
   count: number
   totalBudget: number
   averageMarginability: number
+  actualMargin: number
+  remainingBudget: number
 }
 
 interface ProjectStats {
   openProjects: number
   openProjectsBudget: number
   averageMarginability: number
+  actualMargin: number
   projectsWithNegativeMargin: number
   billableProjects: number
   nonBillableProjects: number
+  totalHours: {
+    future: number
+    pastConfirmed: number
+    pastUnconfirmed: number
+  }
+  remainingBudget: number
   projectsByCategory: Record<string, CategoryStats>
   projectsByArea: Record<string, CategoryStats>
   topBudgetProjects: Array<{
@@ -34,6 +43,14 @@ interface ProjectStats {
     status: string
     budget: number
     marginability_percentage: number
+    actualMargin: number
+    consumedBudget: number
+    remainingBudget: number
+    totalHours: {
+      future: number
+      pastConfirmed: number
+      pastUnconfirmed: number
+    }
     start_date: string
     end_date: string
   }>
@@ -97,16 +114,29 @@ export default function ProjectsDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold">{formatCurrency(stats.openProjectsBudget)}</div>
+            <div className="text-sm text-gray-500 mt-1">
+              Remaining: {formatCurrency(stats.remainingBudget)}
+            </div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>Average Marginability</CardTitle>
+            <CardTitle>Margins</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold">{stats.averageMarginability.toFixed(1)}%</div>
-            <Progress value={stats.averageMarginability} className="mt-2" />
+            <div className="space-y-2">
+              <div>
+                <div className="text-sm text-gray-500">Target Margin</div>
+                <div className="text-2xl font-bold">{stats.averageMarginability.toFixed(1)}%</div>
+              </div>
+              <div>
+                <div className="text-sm text-gray-500">Actual Margin</div>
+                <div className={`text-2xl font-bold ${stats.actualMargin < 0 ? 'text-red-500' : 'text-green-500'}`}>
+                  {stats.actualMargin.toFixed(1)}%
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
 
@@ -116,37 +146,73 @@ export default function ProjectsDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-red-500">{stats.projectsWithNegativeMargin}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Billable vs Non-Billable</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div>
-                <div className="text-sm text-gray-500">Billable Projects</div>
-                <div className="text-2xl font-bold text-green-600">{stats.billableProjects}</div>
-                <div className="text-sm text-gray-500">
-                  {((stats.billableProjects / stats.openProjects) * 100).toFixed(1)}% of open projects
-                </div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-500">Non-Billable Projects</div>
-                <div className="text-2xl font-bold text-orange-600">{stats.nonBillableProjects}</div>
-                <div className="text-sm text-gray-500">
-                  {((stats.nonBillableProjects / stats.openProjects) * 100).toFixed(1)}% of open projects
-                </div>
-              </div>
-              <Progress 
-                value={(stats.billableProjects / stats.openProjects) * 100} 
-                className="mt-2"
-              />
+            <div className="text-sm text-gray-500 mt-1">
+              {((stats.projectsWithNegativeMargin / stats.openProjects) * 100).toFixed(1)}% of open projects
             </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Hours Distribution */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Hours Distribution</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <div className="text-sm text-gray-500">Future Hours</div>
+              <div className="text-2xl font-bold">{stats.totalHours.future.toFixed(1)}</div>
+              <div className="text-sm text-gray-500">
+                {((stats.totalHours.future / (stats.totalHours.future + stats.totalHours.pastConfirmed + stats.totalHours.pastUnconfirmed)) * 100).toFixed(1)}%
+              </div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-500">Past Confirmed Hours</div>
+              <div className="text-2xl font-bold text-green-600">{stats.totalHours.pastConfirmed.toFixed(1)}</div>
+              <div className="text-sm text-gray-500">
+                {((stats.totalHours.pastConfirmed / (stats.totalHours.future + stats.totalHours.pastConfirmed + stats.totalHours.pastUnconfirmed)) * 100).toFixed(1)}%
+              </div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-500">Past Unconfirmed Hours</div>
+              <div className="text-2xl font-bold text-orange-600">{stats.totalHours.pastUnconfirmed.toFixed(1)}</div>
+              <div className="text-sm text-gray-500">
+                {((stats.totalHours.pastUnconfirmed / (stats.totalHours.future + stats.totalHours.pastConfirmed + stats.totalHours.pastUnconfirmed)) * 100).toFixed(1)}%
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Billable vs Non-Billable */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Billable vs Non-Billable</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <div>
+              <div className="text-sm text-gray-500">Billable Projects</div>
+              <div className="text-2xl font-bold text-green-600">{stats.billableProjects}</div>
+              <div className="text-sm text-gray-500">
+                {((stats.billableProjects / stats.openProjects) * 100).toFixed(1)}% of open projects
+              </div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-500">Non-Billable Projects</div>
+              <div className="text-2xl font-bold text-orange-600">{stats.nonBillableProjects}</div>
+              <div className="text-sm text-gray-500">
+                {((stats.nonBillableProjects / stats.openProjects) * 100).toFixed(1)}% of open projects
+              </div>
+            </div>
+            <Progress 
+              value={(stats.billableProjects / stats.openProjects) * 100} 
+              className="mt-2"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Distribution Charts */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -161,7 +227,9 @@ export default function ProjectsDashboard() {
                   <TableHead>Category</TableHead>
                   <TableHead>Count</TableHead>
                   <TableHead>Budget</TableHead>
-                  <TableHead>Avg. Margin</TableHead>
+                  <TableHead>Target Margin</TableHead>
+                  <TableHead>Actual Margin</TableHead>
+                  <TableHead>Remaining Budget</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -170,9 +238,11 @@ export default function ProjectsDashboard() {
                     <TableCell>{category}</TableCell>
                     <TableCell>{stats.count}</TableCell>
                     <TableCell>{formatCurrency(stats.totalBudget)}</TableCell>
-                    <TableCell className={stats.averageMarginability < 0 ? 'text-red-500' : ''}>
-                      {stats.averageMarginability.toFixed(1)}%
+                    <TableCell>{stats.averageMarginability.toFixed(1)}%</TableCell>
+                    <TableCell className={stats.actualMargin < 0 ? 'text-red-500' : ''}>
+                      {stats.actualMargin.toFixed(1)}%
                     </TableCell>
+                    <TableCell>{formatCurrency(stats.remainingBudget)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -191,7 +261,9 @@ export default function ProjectsDashboard() {
                   <TableHead>Area</TableHead>
                   <TableHead>Count</TableHead>
                   <TableHead>Budget</TableHead>
-                  <TableHead>Avg. Margin</TableHead>
+                  <TableHead>Target Margin</TableHead>
+                  <TableHead>Actual Margin</TableHead>
+                  <TableHead>Remaining Budget</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -200,9 +272,11 @@ export default function ProjectsDashboard() {
                     <TableCell>{area}</TableCell>
                     <TableCell>{stats.count}</TableCell>
                     <TableCell>{formatCurrency(stats.totalBudget)}</TableCell>
-                    <TableCell className={stats.averageMarginability < 0 ? 'text-red-500' : ''}>
-                      {stats.averageMarginability.toFixed(1)}%
+                    <TableCell>{stats.averageMarginability.toFixed(1)}%</TableCell>
+                    <TableCell className={stats.actualMargin < 0 ? 'text-red-500' : ''}>
+                      {stats.actualMargin.toFixed(1)}%
                     </TableCell>
+                    <TableCell>{formatCurrency(stats.remainingBudget)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -222,7 +296,11 @@ export default function ProjectsDashboard() {
               <TableRow>
                 <TableHead>Title</TableHead>
                 <TableHead>Budget</TableHead>
-                <TableHead>Marginability</TableHead>
+                <TableHead>Consumed</TableHead>
+                <TableHead>Remaining</TableHead>
+                <TableHead>Target Margin</TableHead>
+                <TableHead>Actual Margin</TableHead>
+                <TableHead>Hours</TableHead>
                 <TableHead>Start Date</TableHead>
                 <TableHead>End Date</TableHead>
               </TableRow>
@@ -232,8 +310,18 @@ export default function ProjectsDashboard() {
                 <TableRow key={project.uid}>
                   <TableCell className="font-medium">{project.title}</TableCell>
                   <TableCell>{formatCurrency(project.budget)}</TableCell>
-                  <TableCell className={project.marginability_percentage < 0 ? 'text-red-500' : ''}>
-                    {project.marginability_percentage.toFixed(1)}%
+                  <TableCell>{formatCurrency(project.consumedBudget)}</TableCell>
+                  <TableCell>{formatCurrency(project.remainingBudget)}</TableCell>
+                  <TableCell>{project.marginability_percentage.toFixed(1)}%</TableCell>
+                  <TableCell className={project.actualMargin < 0 ? 'text-red-500' : ''}>
+                    {project.actualMargin.toFixed(1)}%
+                  </TableCell>
+                  <TableCell>
+                    <div className="text-sm">
+                      <div>Future: {project.totalHours.future.toFixed(1)}h</div>
+                      <div>Past Confirmed: {project.totalHours.pastConfirmed.toFixed(1)}h</div>
+                      <div>Past Unconfirmed: {project.totalHours.pastUnconfirmed.toFixed(1)}h</div>
+                    </div>
                   </TableCell>
                   <TableCell>{new Date(project.start_date).toLocaleDateString()}</TableCell>
                   <TableCell>{new Date(project.end_date).toLocaleDateString()}</TableCell>
