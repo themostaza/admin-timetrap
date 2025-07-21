@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { CalendarIcon, Plus, Trash2, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { supabase } from '@/lib/supabase'
+// Note: Using API routes for database operations instead of direct client access
 import _ from 'lodash'
 import { toast } from "sonner"
 
@@ -48,15 +48,15 @@ export default function WorkingCalendar() {
   const fetchWorkingDays = async () => {
     setIsLoading(true)
     try {
-      const { data, error } = await supabase
-        .from('working_days_calendar')
-        .select('*')
-        .order('calendar_day', { ascending: false })
-
-      if (error) throw error
-      setWorkingDays(data || [])
+      const response = await fetch('/api/working-calendar')
+      if (!response.ok) {
+        throw new Error('Failed to fetch working days')
+      }
+      const data = await response.json()
+      setWorkingDays(data)
     } catch (error) {
       console.error('Error fetching working days:', error)
+      toast.error('Failed to fetch working days')
     } finally {
       setIsLoading(false)
     }
@@ -69,15 +69,21 @@ export default function WorkingCalendar() {
   const handleAdd = async () => {
     try {
       setIsLoading(true)
-      const { error } = await supabase
-        .from('working_days_calendar')
-        .insert([{
+      const response = await fetch('/api/working-calendar', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
           calendar_day: formData.calendar_day,
           is_working_day: formData.is_working_day,
           description: formData.description || null
-        }])
+        }),
+      })
 
-      if (error) throw error
+      if (!response.ok) {
+        throw new Error('Failed to create working day')
+      }
       
       await fetchWorkingDays()
       setIsDialogOpen(false)
@@ -98,16 +104,22 @@ export default function WorkingCalendar() {
   const handleUpdate = async (dayId: number, updates: Partial<WorkingDay>) => {
     try {
       setUpdatingIds(prev => [...prev, dayId])
-      const { error } = await supabase
-        .from('working_days_calendar')
-        .update(updates)
-        .eq('id', dayId)
+      const response = await fetch(`/api/working-calendar/${dayId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      })
 
-      if (error) throw error
+      if (!response.ok) {
+        throw new Error('Failed to update working day')
+      }
 
+      const updatedDay = await response.json()
       setWorkingDays(prevDays => 
         prevDays.map(day => 
-          day.id === dayId ? { ...day, ...updates } : day
+          day.id === dayId ? { ...day, ...updatedDay } : day
         )
       )
       toast.success('Day updated successfully')
@@ -135,12 +147,13 @@ export default function WorkingCalendar() {
   const handleDelete = async (id: number) => {
     try {
       setUpdatingIds(prev => [...prev, id])
-      const { error } = await supabase
-        .from('working_days_calendar')
-        .delete()
-        .eq('id', id)
+      const response = await fetch(`/api/working-calendar/${id}`, {
+        method: 'DELETE',
+      })
 
-      if (error) throw error
+      if (!response.ok) {
+        throw new Error('Failed to delete working day')
+      }
       
       await fetchWorkingDays()
       toast.success('Day deleted successfully')
@@ -158,6 +171,7 @@ export default function WorkingCalendar() {
         <Card className="p-6">
           <div className="flex justify-between items-center mb-4">
             <h1 className="text-2xl font-bold">📅 Working Calendar</h1>
+            
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
               <DialogTrigger asChild>
                 <Button>
@@ -169,8 +183,8 @@ export default function WorkingCalendar() {
                 <DialogHeader>
                   <DialogTitle>Add Working Day</DialogTitle>
                 </DialogHeader>
-                <div className="space-y-4 pt-4">
-                  <div className="grid gap-2">
+                <div className="space-y-4">
+                  <div>
                     <Label>Date</Label>
                     <Popover>
                       <PopoverTrigger asChild>
@@ -182,10 +196,10 @@ export default function WorkingCalendar() {
                           )}
                         >
                           <CalendarIcon className="mr-2 h-4 w-4" />
-                          {selectedDate ? format(selectedDate, "PPP") : <span>Pick a date</span>}
+                          {selectedDate ? format(selectedDate, "PPP") : "Pick a date"}
                         </Button>
                       </PopoverTrigger>
-                      <PopoverContent className="w-auto p-0" align="start">
+                      <PopoverContent className="w-auto p-0">
                         <Calendar
                           mode="single"
                           selected={selectedDate}
@@ -206,87 +220,75 @@ export default function WorkingCalendar() {
                   
                   <div className="flex items-center space-x-2">
                     <Switch
-                      id="is-working-day"
                       checked={formData.is_working_day}
                       onCheckedChange={(checked) => 
                         setFormData(prev => ({ ...prev, is_working_day: checked }))
                       }
                     />
-                    <Label htmlFor="is-working-day">Working Day</Label>
+                    <Label>Working Day</Label>
                   </div>
-
-                  <div className="grid gap-2">
+                  
+                  <div>
                     <Label>Description</Label>
                     <Textarea
                       value={formData.description}
                       onChange={(e) => 
                         setFormData(prev => ({ ...prev, description: e.target.value }))
                       }
-                      placeholder="Add any notes about this day..."
+                      placeholder="Optional description..."
                     />
                   </div>
-
-                  <Button 
-                    className="w-full"
-                    onClick={handleAdd}
-                    disabled={isLoading}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Adding...
-                      </>
-                    ) : (
-                      'Add Day'
-                    )}
+                  
+                  <Button onClick={handleAdd} disabled={isLoading} className="w-full">
+                    {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    Add Day
                   </Button>
                 </div>
               </DialogContent>
             </Dialog>
           </div>
 
-          <div className="space-y-4">
-            {isLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              </div>
-            ) : (
-              workingDays.map((day) => (
+          {isLoading && workingDays.length === 0 ? (
+            <div className="flex justify-center items-center h-64">
+              <Loader2 className="h-8 w-8 animate-spin" />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {workingDays.map((day) => (
                 <Card key={day.id} className="p-4">
-                  <div className="flex justify-between items-center">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-4">
-                        <span className="font-medium">
-                          {format(new Date(day.calendar_day), 'EEEE, MMMM d, yyyy')}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <Switch
-                            checked={day.is_working_day}
-                            onCheckedChange={(checked) => 
-                              handleUpdate(day.id, { is_working_day: checked })
-                            }
-                            disabled={updatingIds.includes(day.id)}
-                          />
-                          <span className={cn(
-                            "text-sm",
-                            day.is_working_day ? "text-green-600" : "text-red-600"
-                          )}>
-                            {day.is_working_day ? 'Working Day' : 'Non-Working Day'}
-                          </span>
-                        </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4 flex-1">
+                      <div className="font-medium min-w-32">
+                        {format(new Date(day.calendar_day), 'yyyy-MM-dd')}
                       </div>
-                      <Textarea
-                        value={day.description || ''}
-                        onChange={(e) => handleDescriptionChange(day.id, e.target.value)}
-                        placeholder="Add notes..."
-                        className="mt-2 resize-none"
-                        disabled={updatingIds.includes(day.id)}
-                      />
+                      
+                      <div className="flex items-center space-x-2">
+                        <Switch
+                          checked={day.is_working_day}
+                          onCheckedChange={(checked) => 
+                            handleUpdate(day.id, { is_working_day: checked })
+                          }
+                          disabled={updatingIds.includes(day.id)}
+                        />
+                        <Label className={day.is_working_day ? "text-green-600" : "text-red-600"}>
+                          {day.is_working_day ? "Working" : "Non-working"}
+                        </Label>
+                      </div>
+                      
+                      <div className="flex-1">
+                        <Textarea
+                          value={day.description || ''}
+                          onChange={(e) => handleDescriptionChange(day.id, e.target.value)}
+                          placeholder="Description..."
+                          className="min-h-8"
+                          disabled={updatingIds.includes(day.id)}
+                        />
+                      </div>
                     </div>
+                    
                     <Button
-                      variant="ghost"
-                      size="icon"
-                      className="ml-4"
+                      variant="destructive"
+                      size="sm"
                       onClick={() => handleDelete(day.id)}
                       disabled={updatingIds.includes(day.id)}
                     >
@@ -298,9 +300,9 @@ export default function WorkingCalendar() {
                     </Button>
                   </div>
                 </Card>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          )}
         </Card>
       </main>
     </div>

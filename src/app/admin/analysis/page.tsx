@@ -8,13 +8,34 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils"
 import { format } from 'date-fns'
 import { CalendarIcon, ChevronDown, ChevronUp, X, Clock } from "lucide-react"
-import { supabase } from '@/lib/supabase'
+// Note: Using API routes for database operations instead of direct client access
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip } from 'recharts';
 
 const formatHoursAndMinutes = (hours: number): string => {
   const h = Math.floor(hours)
   const m = Math.round((hours - h) * 60)
   return `${h}h ${m}m`
+}
+
+interface User {
+  uid: string
+  nominative: string
+  email: string
+}
+
+interface CoverageResult {
+  userId: string
+  coverageData: {
+    dailyCoverage: Array<{
+      date: string
+      expectedHours: number
+      actualHours: number
+      coverage: number
+    }>
+    overallCoverage: number
+    totalExpectedHours: number
+    totalActualHours: number
+  } | null
 }
 
 interface CategorySummary {
@@ -119,19 +140,16 @@ export default function AdminDashboard() {
       const dayStart = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0))
       const dayEnd = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999))
   
-      // 1. Fetch all active users
-      const { data: activeUsers, error: userError } = await supabase
-        .from('users')
-        .select('uid, nominative, email')
-        .eq('status', 'active')
-  
-      if (userError) {
-        console.error('Error fetching users:', userError)
+            // 1. Fetch all active users
+      const usersResponse = await fetch('/api/users/active')
+      if (!usersResponse.ok) {
+        console.error('Error fetching users:', await usersResponse.text())
         return
       }
+      const activeUsers = await usersResponse.json()
   
       // 2. Fetch coverage data for all users in parallel
-      const coveragePromises = activeUsers.map(async (user) => {
+      const coveragePromises = activeUsers.map(async (user: User) => {
         try {
           const response = await fetch(`${window.location.origin}/api/coverage`, {
             method: 'POST',
@@ -161,48 +179,39 @@ export default function AdminDashboard() {
         }
       })
   
-      // 3. Fetch all time entries in paginated form
+            // 3. Fetch all time entries in paginated form
       let allTimeEntries: TimeEntry[] = []
       let hasMore = true
       let currentPage = 0
       const PAGE_SIZE = 1000
-  
+
       while (hasMore) {
-        const { data: timeEntries, error } = await supabase
-          .from('time_blocking_events')
-          .select(`
-            uid,
-            user_id,
-            start_time,
-            end_time,
-            completed,
-            project:projects (
-              uid,
-              title,
-              not_billable
-            ),
-            category:task_categories (
-              uid,
-              name,
-              color
-            )
-          `)
-          .gte('start_time', dayStart.getTime())
-          .lte('end_time', dayEnd.getTime())
-          .eq('event_type', 'activity')
-          .range(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE - 1)
-          .order('start_time', { ascending: true })
-  
-        if (error) {
-          console.error('Query error:', error)
+        const timeEntriesResponse = await fetch('/api/time-entries', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            startDate: dayStart.toISOString(),
+            endDate: dayEnd.toISOString(),
+            page: currentPage,
+            pageSize: PAGE_SIZE
+          }),
+        })
+
+        if (!timeEntriesResponse.ok) {
+          console.error('Error fetching time entries:', await timeEntriesResponse.text())
           break
         }
-  
-        if (timeEntries.length > 0) {
-          allTimeEntries = [...allTimeEntries, ...timeEntries as unknown as TimeEntry[]]
+
+        const timeEntriesData = await timeEntriesResponse.json()
+        const { entries, hasMore: moreEntries } = timeEntriesData
+
+        if (entries.length > 0) {
+          allTimeEntries = [...allTimeEntries, ...entries as TimeEntry[]]
         }
-  
-        hasMore = timeEntries.length === PAGE_SIZE
+
+        hasMore = moreEntries
         currentPage++
       }
   
@@ -210,9 +219,9 @@ export default function AdminDashboard() {
       const coverageResults = await Promise.all(coveragePromises)
   
       // 5. Process data for each user
-      const processedData: UserTimeData[] = activeUsers.map(user => {
+      const processedData: UserTimeData[] = activeUsers.map((user: User) => {
         const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid)
-        const userCoverage = coverageResults.find(cr => cr.userId === user.uid)
+        const userCoverage = coverageResults.find((cr: CoverageResult) => cr.userId === user.uid)
         
         // Initialize maps for aggregation
         const projectMap = new Map<string, ProjectSummary>()

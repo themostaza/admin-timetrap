@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase'
+import { query } from '@/lib/database'
 import { NextResponse } from 'next/server'
 
 interface DailyCoverage {
@@ -6,6 +6,22 @@ interface DailyCoverage {
   expectedHours: number
   actualHours: number
   coverage: number
+}
+
+interface WorkingDay {
+  calendar_day: string
+  is_working_day: boolean
+}
+
+interface Contract {
+  contract_type: string
+  contractual_hours: number
+  contractual_hours_by_day: Record<string, number> | null
+}
+
+interface TimeEntry {
+  start_time: number
+  end_time: number
 }
 
 export async function POST(request: Request) {
@@ -24,41 +40,28 @@ export async function POST(request: Request) {
     console.log('Period:', startDate, 'to', endDate)
 
     // Fetch working days calendar
-    const { data: workingDays, error: calendarError } = await supabase
-      .from('working_days_calendar')
-      .select('calendar_day, is_working_day')
-      .gte('calendar_day', startDate)
-      .lte('calendar_day', endDate)
-      .order('calendar_day')
+    const workingDaysResult = await query<WorkingDay>(`
+      SELECT calendar_day, is_working_day 
+      FROM working_days_calendar 
+      WHERE calendar_day >= $1 AND calendar_day <= $2 
+      ORDER BY calendar_day
+    `, [startDate, endDate])
 
-    if (calendarError) {
-      console.error('Calendar fetch error:', calendarError)
-      return NextResponse.json(
-        { error: 'Error fetching calendar data', details: calendarError }, 
-        { status: 500 }
-      )
-    }
-
-    console.log('Working days calendar entries:', workingDays?.length)
+    const workingDays = workingDaysResult.rows
+    console.log('Working days calendar entries:', workingDays.length)
 
     // Fetch user contracts
-    const { data: contracts, error: contractError } = await supabase
-      .from('organization_user_contracts')
-      .select('*')
-      .eq('user_id', userId)
-      .lte('from_date', endDate)
-      .gte('to_date', startDate)
-      .order('from_date', { ascending: false })
+    const contractsResult = await query<Contract>(`
+      SELECT * FROM organization_user_contracts 
+      WHERE user_id = $1 
+        AND from_date <= $2 
+        AND to_date >= $3 
+      ORDER BY from_date DESC
+    `, [userId, endDate, startDate])
 
-    if (contractError) {
-      console.error('Contract fetch error:', contractError)
-      return NextResponse.json(
-        { error: 'Error fetching contract data', details: contractError }, 
-        { status: 500 }
-      )
-    }
+    const contracts = contractsResult.rows
 
-    if (!contracts || contracts.length === 0) {
+    if (contracts.length === 0) {
       console.log('No contract found for user')
       return NextResponse.json({
         dailyCoverage: [],
@@ -76,28 +79,22 @@ export async function POST(request: Request) {
     })
 
     const extendedEndDate = new Date(endDate);
-      extendedEndDate.setDate(extendedEndDate.getDate() + 1);
-      extendedEndDate.setHours(0, 0, 0, 0);
+    extendedEndDate.setDate(extendedEndDate.getDate() + 1);
+    extendedEndDate.setHours(0, 0, 0, 0);
     
     // Fetch time entries
-    const { data: timeEntries, error: timeError } = await supabase
-      .from('time_blocking_events')
-      .select('start_time, end_time')
-      .eq('user_id', userId)
-      .eq('event_type', 'activity')
-      .eq('completed', true)
-      .gte('start_time', new Date(startDate).getTime())
-      .lt('end_time', extendedEndDate.getTime())
+    const timeEntriesResult = await query<TimeEntry>(`
+      SELECT start_time, end_time 
+      FROM time_blocking_events 
+      WHERE user_id = $1 
+        AND event_type = 'activity' 
+        AND completed = true 
+        AND start_time >= $2 
+        AND end_time < $3
+    `, [userId, new Date(startDate).getTime(), extendedEndDate.getTime()])
 
-    if (timeError) {
-      console.error('Time entries fetch error:', timeError)
-      return NextResponse.json(
-        { error: 'Error fetching time entries', details: timeError }, 
-        { status: 500 }
-      )
-    }
-
-    console.log('Time entries found:', timeEntries?.length)
+    const timeEntries = timeEntriesResult.rows
+    console.log('Time entries found:', timeEntries.length)
 
     // Process each day
     const dailyCoverage: DailyCoverage[] = []
@@ -109,7 +106,7 @@ export async function POST(request: Request) {
 
     while (currentDate <= endDateTime) {
       const currentDateStr = currentDate.toISOString().split('T')[0]
-      const workingDay = workingDays?.find(wd => wd.calendar_day === currentDateStr)
+      const workingDay = workingDays.find(wd => wd.calendar_day === currentDateStr)
       
       // Calculate expected hours
       let expectedHours = 0
@@ -133,30 +130,28 @@ export async function POST(request: Request) {
       const dayEnd = new Date(currentDate)
       dayEnd.setHours(23, 59, 59, 999)
       
-      const dayEntries = timeEntries?.filter(entry => 
+      const dayEntries = timeEntries.filter(entry => 
         entry.start_time >= dayStart.getTime() && 
         entry.end_time <= dayEnd.getTime()
       )
 
-      const actualHours = dayEntries?.reduce((total, entry) => 
+      const actualHours = dayEntries.reduce((total, entry) => 
         total + (entry.end_time - entry.start_time) / 3600000, 0
-      ) || 0
+      )
 
       totalExpectedHoursForDebug += expectedHours
       totalActualHoursForDebug += actualHours
 
       // Log daily details if there's activity or expected hours
-      
-        console.log('Day:', currentDateStr, {
-          isWorkingDay: workingDay?.is_working_day,
-          dayOfWeek: currentDate.getDay(),
-          contractType: contract.contract_type,
-          contractualHours: contract.contractual_hours,
-          expectedHours,
-          actualHours,
-          timeEntries: dayEntries?.length
-        })
-      
+      console.log('Day:', currentDateStr, {
+        isWorkingDay: workingDay?.is_working_day,
+        dayOfWeek: currentDate.getDay(),
+        contractType: contract.contract_type,
+        contractualHours: contract.contractual_hours,
+        expectedHours,
+        actualHours,
+        timeEntries: dayEntries.length
+      })
 
       // Calculate coverage
       const coverage = expectedHours > 0 ? (actualHours / expectedHours) * 100 : 0
@@ -174,9 +169,9 @@ export async function POST(request: Request) {
 
     // Calculate overall coverage
     const totalExpectedHours = dailyCoverage.reduce((sum, day) => sum + day.expectedHours, 0)
-    const totalActualHours = timeEntries?.reduce((sum, entry) => 
+    const totalActualHours = timeEntries.reduce((sum, entry) => 
       sum + ((entry.end_time) - entry.start_time) / 3600000, 0
-    ) || 0  
+    )
     const overallCoverage = totalExpectedHours > 0 ? 
       (totalActualHours / totalExpectedHours) * 100 : 0
 

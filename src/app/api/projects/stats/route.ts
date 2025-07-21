@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/supabase'
+import { query } from '@/lib/database'
 import { NextResponse } from 'next/server'
 
 interface CategoryStats {
@@ -21,10 +21,12 @@ interface Project {
   project_areas?: { name: string }
   uid: string
   title: string
-  status: string
+  status_id: string | null
+  projects_workflows?: { name: string }
   start_date: string
   end_date: string
   not_billable: boolean
+  organization_id: string
 }
 
 interface TimeEntry {
@@ -33,6 +35,21 @@ interface TimeEntry {
   start_time: number
   end_time: number
   completed: boolean
+}
+
+interface UserContract {
+  user_id: string
+  hourly_cost: number
+  organization_id: string
+  from_date: string
+  to_date: string
+}
+
+interface Overhead {
+  amount: number
+  organization_id: string
+  from_date: string
+  to_date: string
 }
 
 interface ProjectStats {
@@ -84,185 +101,107 @@ export async function GET(request: Request) {
       )
     }
 
-    // Fetch all projects for the organization
+    // Fetch all projects for the organization with joins
     console.log('Fetching projects for organization:', organizationId)
-    const { data: projects, error: projectsError } = await supabase
-      .from('projects')
-      .select(`
-        *,
-        project_categories (name),
-        project_areas (name)
-      `)
-      .eq('organization_id', organizationId)
+    const projectsResult = await query<Project & {
+      category_name: string | null
+      area_name: string | null
+      workflow_name: string | null
+    }>(`
+      SELECT 
+        p.*,
+        pc.name as category_name,
+        pa.name as area_name,
+        pw.name as workflow_name
+      FROM projects p
+      LEFT JOIN project_categories pc ON p.category_id = pc.uid
+      LEFT JOIN project_areas pa ON p.area_id = pa.uid
+      LEFT JOIN projects_workflows pw ON p.status_id = pw.uid
+      WHERE p.organization_id = $1
+    `, [organizationId])
 
-    if (projectsError) {
-      console.error('Error fetching projects:', projectsError)
-      return NextResponse.json(
-        { error: 'Error fetching projects', details: projectsError },
-        { status: 500 }
-      )
-    }
+    console.log('Projects fetched:', projectsResult.rows.length, 'projects found')
 
-    console.log('Projects fetched:', projects?.length || 0, 'projects found')
+    // Transform the results to match the expected structure
+    const projects = projectsResult.rows.map(project => ({
+      ...project,
+      project_categories: project.category_name ? { name: project.category_name } : null,
+      project_areas: project.area_name ? { name: project.area_name } : null,
+      projects_workflows: project.workflow_name ? { name: project.workflow_name } : null
+    }))
 
     // Fetch user-project links
     console.log('Fetching user-project links')
-    const { data: userProjectLinks, error: linksError } = await supabase
-      .from('user_project_link')
-      .select('*')
-      .eq('organization_id', organizationId)
+    const userProjectLinksResult = await query(`
+      SELECT * FROM user_project_link 
+      WHERE organization_id = $1
+    `, [organizationId])
 
-    if (linksError) {
-      console.error('Error fetching user-project links:', linksError)
-      return NextResponse.json(
-        { error: 'Error fetching user-project links', details: linksError },
-        { status: 500 }
-      )
-    }
-
-    console.log('User-project links fetched:', userProjectLinks?.length || 0, 'links found')
+    console.log('User-project links fetched:', userProjectLinksResult.rows.length, 'links found')
+    //const userProjectLinks = userProjectLinksResult.rows
 
     // Fetch time entries for all projects
     let timeEntries: TimeEntry[] = []
-    let timeEntriesError = null
 
-    if (projects && projects.length > 0) {
+    if (projects.length > 0) {
       console.log('Starting time entries fetch for', projects.length, 'projects')
-      // Split projects into chunks to avoid query size limits
-      const chunkSize = 100
-      const projectChunks = []
-      for (let i = 0; i < projects.length; i += chunkSize) {
-        projectChunks.push(projects.slice(i, i + chunkSize))
-      }
-
-      console.log('Split into', projectChunks.length, 'chunks')
-
-      // Fetch time entries for each chunk
-      for (const chunk of projectChunks) {
-        const projectIds = chunk.map(p => p.uid).filter(Boolean)
-        console.log('Processing chunk with', projectIds.length, 'valid project IDs')
+      
+      const projectIds = projects.map(p => p.uid).filter(Boolean)
+      
+      if (projectIds.length > 0) {
+        console.log('Fetching time entries for', projectIds.length, 'project IDs')
         
-        if (projectIds.length === 0) {
-          console.log('Skipping empty chunk')
-          continue
-        }
+        // Create placeholders for IN clause
+        const placeholders = projectIds.map((_, i) => `$${i + 1}`).join(', ')
+        
+        const timeEntriesResult = await query<TimeEntry>(`
+          SELECT * FROM time_blocking_events 
+          WHERE project_id IN (${placeholders})
+        `, projectIds)
 
-        console.log('Fetching time entries for project IDs:', projectIds)
-        const { data: chunkData, error: chunkError } = await supabase
-          .from('time_blocking_events')
-          .select('*')
-          .in('project_id', projectIds)
-
-        if (chunkError) {
-          console.error('Error fetching time entries chunk:', chunkError)
-          console.error('Failed project IDs:', projectIds)
-          timeEntriesError = chunkError
-          break
-        }
-
-        if (chunkData) {
-          console.log('Chunk data received:', chunkData.length, 'entries')
-          timeEntries = timeEntries.concat(chunkData)
-        }
+        timeEntries = timeEntriesResult.rows
+        console.log('Total time entries fetched:', timeEntries.length)
       }
     } else {
       console.log('No projects found, skipping time entries fetch')
     }
 
-    if (timeEntriesError) {
-      console.error('Error fetching time entries:', timeEntriesError)
-      return NextResponse.json(
-        { error: 'Error fetching time entries', details: timeEntriesError },
-        { status: 500 }
-      )
-    }
-
-    console.log('Total time entries fetched:', timeEntries.length)
-
     // Fetch user contracts
     console.log('Fetching user contracts')
-    const { data: userContracts, error: contractsError } = await supabase
-      .from('organization_user_contracts')
-      .select('*')
-      .eq('organization_id', organizationId)
-      .lte('from_date', new Date().toISOString())
-      .gte('to_date', new Date().toISOString())
+    const userContractsResult = await query<UserContract>(`
+      SELECT * FROM organization_user_contracts 
+      WHERE organization_id = $1 
+        AND from_date <= $2 
+        AND to_date >= $3
+    `, [organizationId, new Date().toISOString(), new Date().toISOString()])
 
-    if (contractsError) {
-      console.error('Error fetching user contracts:', contractsError)
-      return NextResponse.json(
-        { error: 'Error fetching user contracts', details: contractsError },
-        { status: 500 }
-      )
-    }
-
-    console.log('User contracts fetched:', userContracts?.length || 0, 'contracts found')
+    const userContracts = userContractsResult.rows
+    console.log('User contracts fetched:', userContracts.length, 'contracts found')
 
     // Fetch overheads
     console.log('Fetching overheads')
-    const { data: overheads, error: overheadsError } = await supabase
-      .from('overheads')
-      .select('*')
-      .eq('organization_id', organizationId)
-      .lte('from_date', new Date().toISOString())
-      .gte('to_date', new Date().toISOString())
+    const overheadsResult = await query<Overhead>(`
+      SELECT * FROM overheads 
+      WHERE organization_id = $1 
+        AND from_date <= $2 
+        AND to_date >= $3
+    `, [organizationId, new Date().toISOString(), new Date().toISOString()])
 
-    if (overheadsError) {
-      console.error('Error fetching overheads:', overheadsError)
-      return NextResponse.json(
-        { error: 'Error fetching overheads', details: overheadsError },
-        { status: 500 }
-      )
-    }
-
-    console.log('Overheads fetched:', overheads?.length || 0, 'overheads found')
+    const overheads = overheadsResult.rows
+    console.log('Overheads fetched:', overheads.length, 'overheads found')
 
     // Fetch project expenses
     console.log('Fetching project expenses')
-    const validProjectIds = projects.map(p => p.uid).filter(Boolean)
-    console.log('Valid project IDs for expenses:', validProjectIds.length)
-    console.log('First few project IDs:', validProjectIds.slice(0, 5))
-    
-    let expenses = []
-    let expensesError = null
-    
-    if (validProjectIds.length > 0) {
-      console.log('Attempting to fetch expenses with organizationId:', organizationId)
-      const { data: expensesData, error: expensesErrorData } = await supabase
-        .from('expenses')
-        .select('*')
-        .eq('organization_id', organizationId)
-        
+    const expensesResult = await query(`
+      SELECT * FROM expenses 
+      WHERE organization_id = $1
+    `, [organizationId])
 
-      if (expensesErrorData) {
-        console.error('Error fetching expenses:', expensesErrorData)
-        console.error('Error details:', {
-          message: expensesErrorData.message,
-          details: expensesErrorData.details,
-          hint: expensesErrorData.hint,
-          code: expensesErrorData.code
-        })
-        expensesError = expensesErrorData
-      } else {
-        expenses = expensesData || []
-        console.log('Successfully fetched expenses:', expenses.length)
-      }
-    } else {
-      console.log('No valid project IDs found for expenses query')
-    }
-
-    if (expensesError) {
-      console.error('Error fetching expenses:', expensesError)
-      return NextResponse.json(
-        { error: 'Error fetching expenses', details: expensesError },
-        { status: 500 }
-      )
-    }
-
-    console.log('Expenses fetched:', expenses?.length || 0, 'expenses found')
+    const expenses = expensesResult.rows
+    console.log('Expenses fetched:', expenses.length, 'expenses found')
 
     // Filter open projects
-    const openProjects = projects.filter(p => p.status === 'open')
+    const openProjects = projects.filter(p => p.projects_workflows?.name === 'Aperto')
     
     // Calculate projects with negative margin
     const projectsWithNegativeMargin = openProjects.filter(
@@ -277,8 +216,10 @@ export async function GET(request: Request) {
     const stats: ProjectStats = {
       openProjects: openProjects.length,
       openProjectsBudget: openProjects.reduce((sum, p) => sum + (p.budget || 0), 0),
-      averageMarginability: openProjects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / openProjects.length || 0,
-      actualMargin: 0,
+      averageMarginability: openProjects.length > 0 
+        ? openProjects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / openProjects.length 
+        : 0,
+      actualMargin: 0, // Will be calculated later
       projectsWithNegativeMargin,
       billableProjects,
       nonBillableProjects,
@@ -293,7 +234,7 @@ export async function GET(request: Request) {
       topBudgetProjects: []
     }
 
-    // Calculate project costs and hours
+    // Calculate project costs
     const projectCosts = new Map<string, {
       totalCost: number
       hours: {
@@ -302,6 +243,20 @@ export async function GET(request: Request) {
         pastUnconfirmed: number
       }
     }>()
+
+    // Initialize project costs
+    projects.forEach(project => {
+      if (project.uid) {
+        projectCosts.set(project.uid, {
+          totalCost: 0,
+          hours: {
+            future: 0,
+            pastConfirmed: 0,
+            pastUnconfirmed: 0
+          }
+        })
+      }
+    })
 
     // Process time entries
     timeEntries.forEach(entry => {
@@ -346,136 +301,113 @@ export async function GET(request: Request) {
       projectCost.totalCost += duration * totalHourlyCost
     })
 
-    // Process expenses
-    expenses.forEach(expense => {
-      const projectId = expense.project_id
-      if (!projectCosts.has(projectId)) {
-        projectCosts.set(projectId, {
-          totalCost: 0,
-          hours: {
-            future: 0,
-            pastConfirmed: 0,
-            pastUnconfirmed: 0
-          }
-        })
-      }
-
-      const projectCost = projectCosts.get(projectId)!
-      // Use confirmed_amount if available, otherwise use estimated_amount
-      const expenseAmount = expense.confirmed_amount !== null ? expense.confirmed_amount : expense.estimated_amount || 0
-      projectCost.totalCost += expenseAmount
+    // Aggregate total hours
+    projectCosts.forEach(cost => {
+      stats.totalHours.future += cost.hours.future
+      stats.totalHours.pastConfirmed += cost.hours.pastConfirmed
+      stats.totalHours.pastUnconfirmed += cost.hours.pastUnconfirmed
     })
 
-    // Calculate category statistics (only for open projects)
-    const categoryProjects = new Map<string, Array<Project>>()
+    // Calculate total cost and actual margin
+    let totalCost = 0
+    projectCosts.forEach(cost => {
+      totalCost += cost.totalCost
+    })
+
+    stats.actualMargin = stats.openProjectsBudget > 0 
+      ? ((stats.openProjectsBudget - totalCost) / stats.openProjectsBudget) * 100 
+      : 0
+    stats.remainingBudget = stats.openProjectsBudget - totalCost
+
+    // Calculate statistics by category
     openProjects.forEach(project => {
       const categoryName = project.project_categories?.name || 'Uncategorized'
-      if (!categoryProjects.has(categoryName)) {
-        categoryProjects.set(categoryName, [])
-      }
-      categoryProjects.get(categoryName)?.push(project)
-    })
-
-    categoryProjects.forEach((projects, category) => {
-      const totalBudget = projects.reduce((sum, p) => sum + (p.budget || 0), 0)
-      const avgMarginability = projects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / projects.length
       
-      // Calculate actual costs and margins for category
-      let totalCost = 0
-      const categoryTotalHours = {
-        future: 0,
-        pastConfirmed: 0,
-        pastUnconfirmed: 0
-      }
-
-      projects.forEach(project => {
-        const projectCost = projectCosts.get(project.uid)
-        if (projectCost) {
-          totalCost += projectCost.totalCost
-          categoryTotalHours.future += projectCost.hours.future
-          categoryTotalHours.pastConfirmed += projectCost.hours.pastConfirmed
-          categoryTotalHours.pastUnconfirmed += projectCost.hours.pastUnconfirmed
+      if (!stats.projectsByCategory[categoryName]) {
+        stats.projectsByCategory[categoryName] = {
+          count: 0,
+          totalBudget: 0,
+          averageMarginability: 0,
+          actualMargin: 0,
+          totalHours: { future: 0, pastConfirmed: 0, pastUnconfirmed: 0 },
+          remainingBudget: 0
         }
-      })
-
-      const actualMargin = totalBudget > 0 ? ((totalBudget - totalCost) / totalBudget) * 100 : 0
-      
-      stats.projectsByCategory[category] = {
-        count: projects.length,
-        totalBudget,
-        averageMarginability: avgMarginability,
-        actualMargin,
-        totalHours: categoryTotalHours,
-        remainingBudget: totalBudget - totalCost
       }
+
+      const categoryStats = stats.projectsByCategory[categoryName]
+      const projectCost = projectCosts.get(project.uid) || {
+        totalCost: 0,
+        hours: { future: 0, pastConfirmed: 0, pastUnconfirmed: 0 }
+      }
+
+      categoryStats.count++
+      categoryStats.totalBudget += project.budget || 0
+      categoryStats.totalHours.future += projectCost.hours.future
+      categoryStats.totalHours.pastConfirmed += projectCost.hours.pastConfirmed
+      categoryStats.totalHours.pastUnconfirmed += projectCost.hours.pastUnconfirmed
+      categoryStats.remainingBudget += (project.budget || 0) - projectCost.totalCost
     })
 
-    // Calculate area statistics (only for open projects)
-    const areaProjects = new Map<string, Array<Project>>()
+    // Calculate average marginability by category
+    Object.keys(stats.projectsByCategory).forEach(categoryName => {
+      const categoryProjects = openProjects.filter(p => 
+        (p.project_categories?.name || 'Uncategorized') === categoryName
+      )
+      const categoryStats = stats.projectsByCategory[categoryName]
+      
+      categoryStats.averageMarginability = categoryProjects.length > 0
+        ? categoryProjects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / categoryProjects.length
+        : 0
+
+      categoryStats.actualMargin = categoryStats.totalBudget > 0
+        ? ((categoryStats.totalBudget - categoryStats.remainingBudget) / categoryStats.totalBudget) * 100
+        : 0
+    })
+
+    // Calculate statistics by area (similar logic)
     openProjects.forEach(project => {
-      const areaName = project.project_areas?.name || 'No Area'
-      if (!areaProjects.has(areaName)) {
-        areaProjects.set(areaName, [])
-      }
-      areaProjects.get(areaName)?.push(project)
-    })
-
-    areaProjects.forEach((projects, area) => {
-      const totalBudget = projects.reduce((sum, p) => sum + (p.budget || 0), 0)
-      const avgMarginability = projects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / projects.length
+      const areaName = project.project_areas?.name || 'Uncategorized'
       
-      // Calculate actual costs and margins for area
-      let totalCost = 0
-      const areaTotalHours = {
-        future: 0,
-        pastConfirmed: 0,
-        pastUnconfirmed: 0
-      }
-
-      projects.forEach(project => {
-        const projectCost = projectCosts.get(project.uid)
-        if (projectCost) {
-          totalCost += projectCost.totalCost
-          areaTotalHours.future += projectCost.hours.future
-          areaTotalHours.pastConfirmed += projectCost.hours.pastConfirmed
-          areaTotalHours.pastUnconfirmed += projectCost.hours.pastUnconfirmed
+      if (!stats.projectsByArea[areaName]) {
+        stats.projectsByArea[areaName] = {
+          count: 0,
+          totalBudget: 0,
+          averageMarginability: 0,
+          actualMargin: 0,
+          totalHours: { future: 0, pastConfirmed: 0, pastUnconfirmed: 0 },
+          remainingBudget: 0
         }
-      })
+      }
 
-      const actualMargin = totalBudget > 0 ? ((totalBudget - totalCost) / totalBudget) * 100 : 0
+      const areaStats = stats.projectsByArea[areaName]
+      const projectCost = projectCosts.get(project.uid) || {
+        totalCost: 0,
+        hours: { future: 0, pastConfirmed: 0, pastUnconfirmed: 0 }
+      }
+
+      areaStats.count++
+      areaStats.totalBudget += project.budget || 0
+      areaStats.totalHours.future += projectCost.hours.future
+      areaStats.totalHours.pastConfirmed += projectCost.hours.pastConfirmed
+      areaStats.totalHours.pastUnconfirmed += projectCost.hours.pastUnconfirmed
+      areaStats.remainingBudget += (project.budget || 0) - projectCost.totalCost
+    })
+
+    // Calculate average marginability by area
+    Object.keys(stats.projectsByArea).forEach(areaName => {
+      const areaProjects = openProjects.filter(p => 
+        (p.project_areas?.name || 'Uncategorized') === areaName
+      )
+      const areaStats = stats.projectsByArea[areaName]
       
-      stats.projectsByArea[area] = {
-        count: projects.length,
-        totalBudget,
-        averageMarginability: avgMarginability,
-        actualMargin,
-        totalHours: areaTotalHours,
-        remainingBudget: totalBudget - totalCost
-      }
+      areaStats.averageMarginability = areaProjects.length > 0
+        ? areaProjects.reduce((sum, p) => sum + (p.marginability_percentage || 0), 0) / areaProjects.length
+        : 0
+
+      areaStats.actualMargin = areaStats.totalBudget > 0
+        ? ((areaStats.totalBudget - areaStats.remainingBudget) / areaStats.totalBudget) * 100
+        : 0
     })
-
-    // Calculate overall stats
-    let totalCost = 0
-    const overallTotalHours = {
-      future: 0,
-      pastConfirmed: 0,
-      pastUnconfirmed: 0
-    }
-
-    openProjects.forEach(project => {
-      const projectCost = projectCosts.get(project.uid)
-      if (projectCost) {
-        totalCost += projectCost.totalCost
-        overallTotalHours.future += projectCost.hours.future
-        overallTotalHours.pastConfirmed += projectCost.hours.pastConfirmed
-        overallTotalHours.pastUnconfirmed += projectCost.hours.pastUnconfirmed
-      }
-    })
-
-    stats.actualMargin = stats.openProjectsBudget > 0 ? 
-      ((stats.openProjectsBudget - totalCost) / stats.openProjectsBudget) * 100 : 0
-    stats.totalHours = overallTotalHours
-    stats.remainingBudget = stats.openProjectsBudget - totalCost
 
     // Get open projects sorted by budget (highest first)
     stats.topBudgetProjects = openProjects
@@ -496,7 +428,7 @@ export async function GET(request: Request) {
         return {
           uid: project.uid,
           title: project.title,
-          status: project.status,
+          status: project.projects_workflows?.name || 'Unknown',
           budget: project.budget || 0,
           marginability_percentage: project.marginability_percentage || 0,
           actualMargin,
