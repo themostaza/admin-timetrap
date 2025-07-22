@@ -14,7 +14,7 @@ import {
 import { formatCurrency } from '@/lib/utils'
 
 // Helper function to safely format numbers
-const safeToFixed = (value: any, decimals: number = 1): string => {
+const safeToFixed = (value: unknown, decimals: number = 1): string => {
   // Convert to number first
   const numValue = typeof value === 'string' ? parseFloat(value) : Number(value)
   
@@ -27,7 +27,7 @@ const safeToFixed = (value: any, decimals: number = 1): string => {
 }
 
 // Helper function to safely get numeric values
-const safeNumber = (value: any): number => {
+const safeNumber = (value: unknown): number => {
   // Convert to number first
   const numValue = typeof value === 'string' ? parseFloat(value) : Number(value)
   

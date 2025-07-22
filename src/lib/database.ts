@@ -8,9 +8,11 @@ const pool = new Pool({
     : process.env.DATABASE_URL?.includes('localhost') 
     ? false 
     : { rejectUnauthorized: false }, // Default to SSL for remote connections
-  max: 20, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close clients after 30 seconds of inactivity
-  connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+  max: 5, // Maximum number of clients in the pool (reduced to avoid database limits)
+  idleTimeoutMillis: 10000, // Close clients after 10 seconds of inactivity (reduced)
+  connectionTimeoutMillis: 5000, // Return an error after 5 seconds if connection could not be established
+  min: 0, // Minimum number of clients in the pool
+  maxUses: 7500, // Close a client after it has been used 7500 times
 })
 
 export interface QueryResult<T = unknown> {
@@ -21,6 +23,7 @@ export interface QueryResult<T = unknown> {
 // Database query helper function
 export const query = async <T = unknown>(text: string, params?: unknown[]): Promise<QueryResult<T>> => {
   const client = await pool.connect()
+  console.log(`Pool stats - Total: ${pool.totalCount}, Idle: ${pool.idleCount}, Waiting: ${pool.waitingCount}`)
   try {
     const result = await client.query(text, params)
     return {
