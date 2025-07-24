@@ -6,15 +6,31 @@ import { Calendar } from "@/components/ui/calendar"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
-import { format } from 'date-fns'
+import { format, isValid } from 'date-fns'
 import { CalendarIcon, ChevronDown, ChevronUp, X, Clock } from "lucide-react"
 // Note: Using API routes for database operations instead of direct client access
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip } from 'recharts';
 
 const formatHoursAndMinutes = (hours: number): string => {
+  if (!hours || isNaN(hours)) return '0h 0m'
   const h = Math.floor(hours)
   const m = Math.round((hours - h) * 60)
   return `${h}h ${m}m`
+}
+
+// Safe date formatting function
+const safeFormatDate = (date: number | Date, formatStr: string): string => {
+  try {
+    const dateObj = typeof date === 'number' ? new Date(date) : date
+    if (!isValid(dateObj)) {
+      console.warn('Invalid date:', date)
+      return 'Invalid Date'
+    }
+    return format(dateObj, formatStr)
+  } catch (error) {
+    console.error('Date formatting error:', error, date)
+    return 'Invalid Date'
+  }
 }
 
 interface User {
@@ -239,9 +255,20 @@ export default function AdminDashboard() {
   
         // Process each time entry
         userEntries.forEach(entry => {
+          // Validate entry data
+          if (!entry.start_time || !entry.end_time || isNaN(entry.start_time) || isNaN(entry.end_time)) {
+            console.warn('Invalid time entry:', entry)
+            return
+          }
+
           const duration = (entry.end_time - entry.start_time) / 3600000
+          if (duration < 0) {
+            console.warn('Negative duration for entry:', entry)
+            return
+          }
+          
           totalHours += duration
-  
+
           // Process categories
           if (entry.category) {
             const categoryId = entry.category.uid
@@ -259,9 +286,14 @@ export default function AdminDashboard() {
           } else {
             uncategorizedHours += duration
           }
-  
-          // Process daily entries
+
+          // Process daily entries with safe date creation
           const entryDate = new Date(entry.start_time)
+          if (!isValid(entryDate)) {
+            console.warn('Invalid entry date:', entry.start_time)
+            return
+          }
+
           const dayStartUTC = Date.UTC(
             entryDate.getUTCFullYear(),
             entryDate.getUTCMonth(),
@@ -284,18 +316,18 @@ export default function AdminDashboard() {
 
           const dailyEntry = dailyEntriesMap.get(dayStartUTC)!
           dailyEntry.totalHours += duration
-  
+
           if (entry.completed) {
             dailyEntry.confirmedHours += duration
           } else {
             dailyEntry.unconfirmedHours += duration
           }
-  
+
           // Process projects
           if (entry.project) {
             const projectId = entry.project.uid
             const isBillable = !entry.project.not_billable
-  
+
             if (!projectMap.has(projectId)) {
               projectMap.set(projectId, {
                 projectId,
@@ -307,12 +339,12 @@ export default function AdminDashboard() {
             }
             const projectSummary = projectMap.get(projectId)!
             projectSummary.totalHours += duration
-  
+
             if (isBillable) {
               totalBillableHours += duration
               dailyEntry.billableHours += duration
             }
-  
+
             let dailyProjectSummary = dailyEntry.projectSummaries.find(p => p.projectId === projectId)
             if (!dailyProjectSummary) {
               dailyProjectSummary = {
@@ -327,14 +359,24 @@ export default function AdminDashboard() {
             dailyProjectSummary.totalHours += duration
           } else {
             totalUnassignedHours += duration
-            dailyEntry.unassignedPercentage = (duration / dailyEntry.totalHours) * 100
           }
-  
-          // Update daily percentages
-          dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100
-          dailyEntry.projectSummaries.forEach(project => {
-            project.percentage = (project.totalHours / dailyEntry.totalHours) * 100
-          })
+
+        })
+
+        // Calculate daily percentages after processing all entries
+        dailyEntriesMap.forEach(dailyEntry => {
+          if (dailyEntry.totalHours > 0) {
+            dailyEntry.billablePercentage = (dailyEntry.billableHours / dailyEntry.totalHours) * 100
+            
+            // Calculate unassigned hours for this specific day
+            const dailyProjectHours = dailyEntry.projectSummaries.reduce((sum, p) => sum + p.totalHours, 0)
+            const dailyUnassignedHours = dailyEntry.totalHours - dailyProjectHours
+            dailyEntry.unassignedPercentage = dailyUnassignedHours > 0 ? (dailyUnassignedHours / dailyEntry.totalHours) * 100 : 0
+            
+            dailyEntry.projectSummaries.forEach(project => {
+              project.percentage = (project.totalHours / dailyEntry.totalHours) * 100
+            })
+          }
         })
   
         // Calculate final percentages
@@ -755,7 +797,7 @@ export default function AdminDashboard() {
                       onClick={() => toggleDailyEntryExpansion(sidebar.userData!, entry.date)}
                     >
                       <span className="font-medium">
-                        {format(entry.date, 'EEEE, MMMM d, yyyy')}
+                        {safeFormatDate(entry.date, 'EEEE, MMMM d, yyyy')}
                       </span>
                       <div className="flex items-center gap-4">
                         <span className="text-gray-600">
