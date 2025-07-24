@@ -149,35 +149,36 @@ export default function AdminDashboard() {
       const activeUsers = await usersResponse.json()
   
       // 2. Fetch coverage data for all users in parallel
-      const coveragePromises = activeUsers.map(async (user: User) => {
-        try {
-          const response = await fetch(`${window.location.origin}/api/coverage`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              startDate: dayStart.toISOString().split('T')[0],
-              endDate: dayEnd.toISOString().split('T')[0],
-              userId: user.uid
-            }),
-          })
+      // COMMENTED OUT - Coverage API temporarily disabled
+      // const coveragePromises = activeUsers.map(async (user: User) => {
+      //   try {
+      //     const response = await fetch(`${window.location.origin}/api/coverage`, {
+      //       method: 'POST',
+      //       headers: {
+      //         'Content-Type': 'application/json',
+      //       },
+      //       body: JSON.stringify({
+      //         startDate: dayStart.toISOString().split('T')[0],
+      //         endDate: dayEnd.toISOString().split('T')[0],
+      //         userId: user.uid
+      //       }),
+      //     })
       
-          if (!response.ok) {
-            console.error('Coverage API error for user:', user.uid, await response.text())
-            return { userId: user.uid, coverageData: null }
-          }
+      //     if (!response.ok) {
+      //       console.error('Coverage API error for user:', user.uid, await response.text())
+      //       return { userId: user.uid, coverageData: null }
+      //     }
           
-          const data = await response.json()
-          return {
-            userId: user.uid,
-            coverageData: data
-          }
-        } catch (error) {
-          console.error('Coverage request error for user:', user.uid, error)
-          return { userId: user.uid, coverageData: null }
-        }
-      })
+      //     const data = await response.json()
+      //     return {
+      //       userId: user.uid,
+      //       coverageData: data
+      //     }
+      //   } catch (error) {
+      //     console.error('Coverage request error for user:', user.uid, error)
+      //     return { userId: user.uid, coverageData: null }
+      //   }
+      // })
   
             // 3. Fetch all time entries in paginated form
       let allTimeEntries: TimeEntry[] = []
@@ -216,7 +217,9 @@ export default function AdminDashboard() {
       }
   
       // 4. Wait for coverage data
-      const coverageResults = await Promise.all(coveragePromises)
+      // COMMENTED OUT - Coverage API temporarily disabled
+      // const coverageResults = await Promise.all(coveragePromises)
+      const coverageResults: CoverageResult[] = []
   
       // 5. Process data for each user
       const processedData: UserTimeData[] = activeUsers.map((user: User) => {
