@@ -39,20 +39,20 @@ interface User {
   email: string
 }
 
-interface CoverageResult {
-  userId: string
-  coverageData: {
-    dailyCoverage: Array<{
-      date: string
-      expectedHours: number
-      actualHours: number
-      coverage: number
-    }>
-    overallCoverage: number
-    totalExpectedHours: number
-    totalActualHours: number
-  } | null
-}
+// interface CoverageResult {
+//   userId: string
+//   coverageData: {
+//     dailyCoverage: Array<{
+//       date: string
+//       expectedHours: number
+//       actualHours: number
+//       coverage: number
+//     }>
+//     overallCoverage: number
+//     totalExpectedHours: number
+//     totalActualHours: number
+//   } | null
+// }
 
 interface CategorySummary {
   categoryId: string;
@@ -140,6 +140,7 @@ export default function AdminDashboard() {
   const [endDate, setEndDate] = useState<Date | undefined>(new Date())
   const [userTimeData, setUserTimeData] = useState<UserTimeData[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [sidebar, setSidebar] = useState<SidebarState>({
     isOpen: false,
     userData: null
@@ -149,10 +150,18 @@ export default function AdminDashboard() {
 
   
 
-  const fetchTimeTrackingData = async (start: Date, end: Date) => {
+    const fetchTimeTrackingData = async (start: Date, end: Date) => {
     setIsLoading(true)
-  
+    setError(null)
+
     try {
+      // Validate input dates
+      if (!start || !end || !isValid(start) || !isValid(end)) {
+        setError('Invalid date range provided')
+        console.error('Invalid date range provided')
+        return
+      }
+
       const dayStart = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0))
       const dayEnd = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999))
   
@@ -235,12 +244,13 @@ export default function AdminDashboard() {
       // 4. Wait for coverage data
       // COMMENTED OUT - Coverage API temporarily disabled
       // const coverageResults = await Promise.all(coveragePromises)
-      const coverageResults: CoverageResult[] = []
+      // const coverageResults: CoverageResult[] = []
   
       // 5. Process data for each user
       const processedData: UserTimeData[] = activeUsers.map((user: User) => {
         const userEntries = allTimeEntries.filter(entry => entry.user_id === user.uid)
-        const userCoverage = coverageResults.find((cr: CoverageResult) => cr.userId === user.uid)
+        // Coverage calculations disabled
+        // const userCoverage = coverageResults.find((cr: CoverageResult) => cr.userId === user.uid)
         
         // Initialize maps for aggregation
         const projectMap = new Map<string, ProjectSummary>()
@@ -379,13 +389,13 @@ export default function AdminDashboard() {
           }
         })
   
-        // Calculate final percentages
+                // Calculate final percentages with safe division
         projectMap.forEach(project => {
-          project.percentage = (project.totalHours / totalHours) * 100
+          project.percentage = totalHours > 0 ? (project.totalHours / totalHours) * 100 : 0
         })
-  
+
         categoryMap.forEach(category => {
-          category.percentage = (category.totalHours / totalHours) * 100
+          category.percentage = totalHours > 0 ? (category.totalHours / totalHours) * 100 : 0
         })
   
         // Process category summaries
@@ -396,7 +406,7 @@ export default function AdminDashboard() {
             name: 'Uncategorized',
             color: '#E0E0E0',
             totalHours: uncategorizedHours,
-            percentage: (uncategorizedHours / totalHours) * 100
+            percentage: totalHours > 0 ? (uncategorizedHours / totalHours) * 100 : 0
           })
         }
         categorySummaries = categorySummaries.sort((a, b) => b.totalHours - a.totalHours)
@@ -420,8 +430,9 @@ export default function AdminDashboard() {
           projectSummaries: Array.from(projectMap.values()),
           categorySummaries,
           dailyEntries: Array.from(dailyEntriesMap.values()),
-          coverageData: userCoverage?.coverageData,
-          coveragePercentage: userCoverage?.coverageData?.overallCoverage || 0,
+          // Coverage disabled - showing placeholder values
+          coverageData: undefined,
+          coveragePercentage: 0,
           isExpanded: false
         }
       })
@@ -434,6 +445,7 @@ export default function AdminDashboard() {
       setUserTimeData(sortedData)
     } catch (error) {
       console.error('Error processing data:', error)
+      setError(error instanceof Error ? error.message : 'An unexpected error occurred')
     } finally {
       setIsLoading(false)
     }
@@ -555,6 +567,14 @@ export default function AdminDashboard() {
                 </Button>
               </div>
 
+              {error && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                  <p className="text-red-800 text-sm">
+                    <strong>Error:</strong> {error}
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 {userTimeData.map((userData) => (
                   <div key={userData.userId} className="border rounded-lg">
@@ -611,19 +631,19 @@ export default function AdminDashboard() {
                             <div className="bg-white p-4 rounded-lg shadow-sm">
                               <div className="text-sm text-gray-500">Billable %</div>
                               <div className="text-lg font-medium">
-                                {userData.billablePercentage.toFixed(1)}%
+                                {(userData.billablePercentage || 0).toFixed(1)}%
                               </div>
                             </div>
                             <div className="bg-white p-4 rounded-lg shadow-sm">
                               <div className="text-sm text-gray-500">Non-Billable %</div>
                               <div className="text-lg font-medium">
-                                {(100 - userData.billablePercentage).toFixed(1)}%
+                                {(100 - (userData.billablePercentage || 0)).toFixed(1)}%
                               </div>
                             </div>
                             <div className="bg-white p-4 rounded-lg shadow-sm">
                               <div className="text-sm text-gray-500">Coverage %</div>
-                              <div className="text-lg font-medium">
-                                {userData.coveragePercentage.toFixed(1)}% [{userData.coverageData?.totalActualHours}/{userData.coverageData?.totalExpectedHours}]
+                              <div className="text-lg font-medium text-gray-400">
+                                -- [Disabled]
                               </div>
                             </div>
                           </div>
@@ -637,39 +657,47 @@ export default function AdminDashboard() {
                           <div className="bg-white p-4 rounded-lg shadow-sm">
                             <div className="flex items-start justify-between">
                               <div className="flex-shrink-0">
-                                <PieChart width={300} height={300}>
-                                  <Pie
-                                    data={userData.categorySummaries}
-                                    dataKey="totalHours"
-                                    nameKey="name"
-                                    cx="50%"
-                                    cy="50%"
-                                    outerRadius={100}
-                                    innerRadius={60}
-                                    paddingAngle={2}
-                                  >
-                                    {userData.categorySummaries.map((category) => (
-                                      <Cell key={category.categoryId} fill={category.color} />
-                                    ))}
-                                  </Pie>
-                                  <RechartsTooltip
-                                    content={({ active, payload }) => {
-                                      if (active && payload && payload.length) {
-                                        const data = payload[0].payload;
-                                        return (
-                                          <div className="bg-white p-2 shadow rounded border">
-                                            <p className="font-medium">{data.name}</p>
-                                            <p className="text-sm text-gray-600">
-                                              {formatHoursAndMinutes(data.totalHours)}
-                                              {' '}({data.percentage.toFixed(1)}%)
-                                            </p>
-                                          </div>
-                                        );
-                                      }
-                                      return null;
-                                    }}
-                                  />
-                                </PieChart>
+                                {userData.categorySummaries && userData.categorySummaries.length > 0 ? (
+                                  <PieChart width={300} height={300}>
+                                    <Pie
+                                      data={userData.categorySummaries.filter(cat => cat.totalHours > 0)}
+                                      dataKey="totalHours"
+                                      nameKey="name"
+                                      cx="50%"
+                                      cy="50%"
+                                      outerRadius={100}
+                                      innerRadius={60}
+                                      paddingAngle={2}
+                                    >
+                                      {userData.categorySummaries
+                                        .filter(cat => cat.totalHours > 0)
+                                        .map((category) => (
+                                          <Cell key={category.categoryId} fill={category.color || '#808080'} />
+                                        ))}
+                                    </Pie>
+                                    <RechartsTooltip
+                                      content={({ active, payload }) => {
+                                        if (active && payload && payload.length) {
+                                          const data = payload[0].payload;
+                                          return (
+                                            <div className="bg-white p-2 shadow rounded border">
+                                              <p className="font-medium">{data.name || 'Unknown'}</p>
+                                              <p className="text-sm text-gray-600">
+                                                {formatHoursAndMinutes(data.totalHours || 0)}
+                                                {' '}({(data.percentage || 0).toFixed(1)}%)
+                                              </p>
+                                            </div>
+                                          );
+                                        }
+                                        return null;
+                                      }}
+                                    />
+                                  </PieChart>
+                                ) : (
+                                  <div className="w-[300px] h-[300px] flex items-center justify-center text-gray-500">
+                                    No data available
+                                  </div>
+                                )}
                               </div>
                               
                               <div className="flex-1 ml-8">
@@ -719,7 +747,7 @@ export default function AdminDashboard() {
                                   </div>
                                   <div className="text-gray-600 flex items-center gap-4">
                                     <span>{formatHoursAndMinutes(project.totalHours)}</span>
-                                    <span className="text-sm">({project.percentage.toFixed(1)}%)</span>
+                                    <span className="text-sm">({(project.percentage || 0).toFixed(1)}%)</span>
                                   </div>
                                 </div>
                                 <div className="mt-2 bg-gray-200 rounded-full h-2">
@@ -727,7 +755,7 @@ export default function AdminDashboard() {
                                     className={`h-2 rounded-full ${
                                       project.isBillable ? 'bg-green-500' : 'bg-orange-500'
                                     }`}
-                                    style={{ width: `${project.percentage}%` }}
+                                    style={{ width: `${Math.max(0, Math.min(100, project.percentage || 0))}%` }}
                                   ></div>
                                 </div>
                               </div>
@@ -742,15 +770,15 @@ export default function AdminDashboard() {
                                   <div className="text-gray-600 flex items-center gap-4">
                                     <span>{formatHoursAndMinutes(
                                       (userData.confirmedHours + userData.unconfirmedHours) * 
-                                      (userData.unassignedPercentage / 100)
+                                      ((userData.unassignedPercentage || 0) / 100)
                                     )}</span>
-                                    <span className="text-sm">({userData.unassignedPercentage.toFixed(1)}%)</span>
+                                    <span className="text-sm">({(userData.unassignedPercentage || 0).toFixed(1)}%)</span>
                                   </div>
                                 </div>
                                 <div className="mt-2 bg-gray-200 rounded-full h-2">
                                   <div
                                     className="h-2 rounded-full bg-gray-400"
-                                    style={{ width: `${userData.unassignedPercentage}%` }}
+                                    style={{ width: `${Math.max(0, Math.min(100, userData.unassignedPercentage || 0))}%` }}
                                   ></div>
                                 </div>
                               </div>
@@ -828,13 +856,13 @@ export default function AdminDashboard() {
                               <div className="bg-white p-4 rounded-lg shadow-sm">
                                 <div className="text-sm text-gray-500">Billable %</div>
                                 <div className="text-lg font-medium">
-                                  {entry.billablePercentage.toFixed(1)}%
+                                  {(entry.billablePercentage || 0).toFixed(1)}%
                                 </div>
                               </div>
                               <div className="bg-white p-4 rounded-lg shadow-sm">
                                 <div className="text-sm text-gray-500">Non-Billable %</div>
                                 <div className="text-lg font-medium">
-                                  {(100 - entry.billablePercentage).toFixed(1)}%
+                                  {(100 - (entry.billablePercentage || 0)).toFixed(1)}%
                                 </div>
                               </div>
                             </div>
@@ -859,7 +887,7 @@ export default function AdminDashboard() {
                                     </div>
                                     <div className="text-gray-600 flex items-center gap-4">
                                       <span>{formatHoursAndMinutes(project.totalHours)}</span>
-                                      <span className="text-sm">({project.percentage.toFixed(1)}%)</span>
+                                      <span className="text-sm">({(project.percentage || 0).toFixed(1)}%)</span>
                                     </div>
                                   </div>
                                   <div className="mt-2 bg-gray-200 rounded-full h-2">
@@ -867,7 +895,7 @@ export default function AdminDashboard() {
                                       className={`h-2 rounded-full ${
                                         project.isBillable ? 'bg-green-500' : 'bg-orange-500'
                                       }`}
-                                      style={{ width: `${project.percentage}%` }}
+                                      style={{ width: `${Math.max(0, Math.min(100, project.percentage || 0))}%` }}
                                     ></div>
                                   </div>
                                 </div>
@@ -881,15 +909,15 @@ export default function AdminDashboard() {
                                     </div>
                                     <div className="text-gray-600 flex items-center gap-4">
                                       <span>{formatHoursAndMinutes(
-                                        entry.totalHours * (entry.unassignedPercentage / 100)
+                                        entry.totalHours * ((entry.unassignedPercentage || 0) / 100)
                                       )}</span>
-                                      <span className="text-sm">({entry.unassignedPercentage.toFixed(1)}%)</span>
+                                      <span className="text-sm">({(entry.unassignedPercentage || 0).toFixed(1)}%)</span>
                                     </div>
                                   </div>
                                   <div className="mt-2 bg-gray-200 rounded-full h-2">
                                     <div
                                       className="h-2 rounded-full bg-gray-400"
-                                      style={{ width: `${entry.unassignedPercentage}%` }}
+                                      style={{ width: `${Math.max(0, Math.min(100, entry.unassignedPercentage || 0))}%` }}
                                     ></div>
                                   </div>
                                 </div>
