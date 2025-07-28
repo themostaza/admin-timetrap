@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronLeft, Users, Settings, LogOut, FileClock, FolderKanban } from 'lucide-react';
+import { ChevronLeft, Users, Settings, LogOut, FileClock, FolderKanban, Database } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 interface SidebarProps {
@@ -28,7 +28,11 @@ const Sidebar = ({ isCollapsed, setIsCollapsed }: SidebarProps) => {
       icon: <FileClock className="h-5 w-5" />,  
       href: '/admin/analysis' 
     },
-    
+    { 
+      name: 'time entries DB', 
+      icon: <Database className="h-5 w-5" />,  
+      href: '/admin/db_timentry' 
+    },
     { 
       name: 'working calendar', 
       icon: <Settings className="h-5 w-5" />,  

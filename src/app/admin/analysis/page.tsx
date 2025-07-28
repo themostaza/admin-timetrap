@@ -1,13 +1,16 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { Card } from "@/components/ui/card"
 import { Calendar } from "@/components/ui/calendar"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
-import { format, isValid } from 'date-fns'
-import { CalendarIcon, ChevronDown, ChevronUp, X, Clock } from "lucide-react"
+import { format, isValid, parseISO } from 'date-fns'
+import { CalendarIcon, ChevronDown, ChevronUp, X, Clock, XCircle, CheckCircle, AlertCircle } from "lucide-react"
 // Note: Using API routes for database operations instead of direct client access
 import { PieChart, Pie, Cell, Tooltip as RechartsTooltip } from 'recharts';
 
@@ -18,18 +21,35 @@ const formatHoursAndMinutes = (hours: number): string => {
   return `${h}h ${m}m`
 }
 
-// Safe date formatting function
-const safeFormatDate = (date: number | Date, formatStr: string): string => {
+// Safe date formatting function  
+const safeFormatDate = (timestamp: number | Date | string, formatStr: string): string => {
   try {
-    const dateObj = typeof date === 'number' ? new Date(date) : date
-    if (!isValid(dateObj)) {
-      console.warn('Invalid date:', date)
+    // Handle various timestamp formats
+    if (!timestamp || timestamp === null || timestamp === undefined) {
+      return 'No Date'
+    }
+    
+    // Convert to number if it's a string
+    const numTimestamp = typeof timestamp === 'string' ? parseFloat(timestamp) : 
+                        typeof timestamp === 'number' ? timestamp : 
+                        timestamp.getTime()
+    
+    // Check if it's in seconds (< year 2000 in milliseconds)
+    const msTimestamp = numTimestamp < 946684800000 ? numTimestamp * 1000 : numTimestamp
+    
+    const date = new Date(msTimestamp)
+    
+    if (!isValid(date)) {
       return 'Invalid Date'
     }
-    return format(dateObj, formatStr)
+    
+    return format(date, formatStr)
   } catch (error) {
-    console.error('Date formatting error:', error, date)
-    return 'Invalid Date'
+    // Only log in development
+    if (process.env.NODE_ENV === 'development') {
+      console.error('Date formatting error:', error, timestamp)
+    }
+    return 'Format Error'
   }
 }
 
@@ -96,11 +116,18 @@ interface UserTimeData {
   categorySummaries: CategorySummary[]
   coveragePercentage: number
   coverageData?: CoverageData;
+  allEntries: TimeEntry[] // Store all entries for this user
 }
 
 interface SidebarState {
   isOpen: boolean
   userData: UserTimeData | null
+}
+
+interface UnconfirmedEntriesDialogState {
+  isOpen: boolean
+  userData: UserTimeData | null
+  entries: TimeEntry[]
 }
 
 interface TimeEntry{
@@ -109,12 +136,16 @@ interface TimeEntry{
   start_time: number;
   end_time: number;
   completed: boolean;
-  project: {
+  event_type?: string;
+  project_id?: string;
+  category_id?: string;
+  duration_hours?: string;
+  project?: {
       uid: string;
       title: string;
       not_billable: boolean;
   };
-  category: {
+  category?: {
     uid: string
     name: string
     color: string
@@ -135,18 +166,73 @@ interface CoverageData {
   totalActualHours: number;
 }
 
-export default function AdminDashboard() {
+// Component that uses useSearchParams
+function AnalysisDashboardContent() {
   const [startDate, setStartDate] = useState<Date | undefined>(new Date(new Date().getFullYear(), new Date().getMonth(), 1))
   const [endDate, setEndDate] = useState<Date | undefined>(new Date())
   const [userTimeData, setUserTimeData] = useState<UserTimeData[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [isClient, setIsClient] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarState>({
     isOpen: false,
     userData: null
   })
 
-  
+  const [unconfirmedDialog, setUnconfirmedDialog] = useState<UnconfirmedEntriesDialogState>({
+    isOpen: false,
+    userData: null,
+    entries: []
+  })
+
+  const router = useRouter()
+  const searchParams = useSearchParams()
+
+  // Set client flag to avoid hydration errors
+  useEffect(() => {
+    setIsClient(true)
+  }, [])
+
+  useEffect(() => {
+    const startParam = searchParams.get('startDate')
+    const endParam = searchParams.get('endDate')
+
+    if (startParam && endParam) {
+      const parsedStartDate = parseISO(startParam)
+      const parsedEndDate = parseISO(endParam)
+
+      if (isValid(parsedStartDate) && isValid(parsedEndDate)) {
+        setStartDate(parsedStartDate)
+        setEndDate(parsedEndDate)
+        // Esegui automaticamente l'analisi quando i parametri sono nell'URL
+        fetchTimeTrackingData(parsedStartDate, parsedEndDate)
+      }
+    }
+  }, [searchParams])
+
+  useEffect(() => {
+    // Aggiorna l'URL solo se entrambe le date sono definite
+    if (startDate && endDate) {
+      const startParam = format(startDate!, 'yyyy-MM-dd')
+      const endParam = format(endDate!, 'yyyy-MM-dd')
+      const currentParams = new URLSearchParams(window.location.search)
+      
+      // Aggiorna solo se i parametri sono diversi da quelli attuali
+      if (currentParams.get('startDate') !== startParam || currentParams.get('endDate') !== endParam) {
+        router.push(`?startDate=${startParam}&endDate=${endParam}`, { scroll: false })
+      }
+    }
+  }, [startDate, endDate, router])
+
+  const handleAnalyze = () => {
+    if (startDate && endDate) {
+      // Aggiorna l'URL e esegui l'analisi
+      const startParam = format(startDate!, 'yyyy-MM-dd')
+      const endParam = format(endDate!, 'yyyy-MM-dd')
+      router.push(`?startDate=${startParam}&endDate=${endParam}`, { scroll: false })
+      fetchTimeTrackingData(startDate, endDate)
+    }
+  }
 
   
 
@@ -298,9 +384,13 @@ export default function AdminDashboard() {
           }
 
           // Process daily entries with safe date creation
-          const entryDate = new Date(entry.start_time)
-          if (!isValid(entryDate)) {
-            console.warn('Invalid entry date:', entry.start_time)
+          // Handle timestamp conversion (check if in seconds vs milliseconds)
+          const startTimestamp = entry.start_time < 946684800000 ? entry.start_time * 1000 : entry.start_time
+          const entryDate = new Date(startTimestamp)
+          
+          // Basic validation: check if it's a valid number and reasonable range
+          if (isNaN(entryDate.getTime()) || entryDate.getTime() < 0) {
+            console.warn('Invalid entry date:', entry.start_time, 'converted to:', startTimestamp, 'resulting date:', entryDate)
             return
           }
 
@@ -334,14 +424,25 @@ export default function AdminDashboard() {
           }
 
           // Process projects
-          if (entry.project) {
-            const projectId = entry.project.uid
-            const isBillable = !entry.project.not_billable
+          if (entry.project_id) {
+            const projectId = entry.project_id
+            const projectTitle = entry.project?.title || 'Unknown Project'
+            const isBillable = entry.project ? !entry.project.not_billable : true
+
+            // Debug logging for project data mismatch
+            if (!entry.project) {
+              console.warn('Entry has project_id but no project object:', {
+                entryUid: entry.uid,
+                projectId: entry.project_id,
+                hasProject: !!entry.project,
+                projectObject: entry.project
+              })
+            }
 
             if (!projectMap.has(projectId)) {
               projectMap.set(projectId, {
                 projectId,
-                title: entry.project.title,
+                title: projectTitle,
                 totalHours: 0,
                 isBillable,
                 percentage: 0
@@ -359,7 +460,7 @@ export default function AdminDashboard() {
             if (!dailyProjectSummary) {
               dailyProjectSummary = {
                 projectId,
-                title: entry.project.title,
+                title: projectTitle,
                 totalHours: 0,
                 isBillable,
                 percentage: 0
@@ -419,6 +520,38 @@ export default function AdminDashboard() {
           .filter(entry => !entry.completed)
           .reduce((sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 0)
   
+        // Debug logging for projects
+        const projectSummariesArray = Array.from(projectMap.values())
+        const entriesWithProjectId = userEntries.filter(e => e.project_id)
+        const entriesWithProject = userEntries.filter(e => e.project)
+        const entriesWithBoth = userEntries.filter(e => e.project_id && e.project)
+        const entriesWithIdButNoObject = userEntries.filter(e => e.project_id && !e.project)
+        
+        console.log(`User ${user.nominative}:`, {
+          totalEntries: userEntries.length,
+          entriesWithProjectIds: entriesWithProjectId.length,
+          entriesWithoutProjectIds: userEntries.filter(e => !e.project_id).length,
+          entriesWithProjectObjects: entriesWithProject.length,
+          entriesWithoutProjectObjects: userEntries.filter(e => !e.project).length,
+          entriesWithBoth: entriesWithBoth.length,
+          entriesWithIdButNoObject: entriesWithIdButNoObject.length,
+          projectsFound: projectSummariesArray.length,
+          totalUnassignedHours,
+          projects: projectSummariesArray.map(p => ({ title: p.title, hours: p.totalHours }))
+        })
+
+        // Log some sample entries if there's a mismatch
+        if (entriesWithIdButNoObject.length > 0) {
+          console.log('Sample entries with project_id but no project object:', 
+            entriesWithIdButNoObject.slice(0, 3).map(e => ({
+              uid: e.uid,
+              project_id: e.project_id,
+              project: e.project,
+              category: e.category
+            }))
+          )
+        }
+
         return {
           userId: user.uid,
           nominative: user.nominative,
@@ -427,13 +560,14 @@ export default function AdminDashboard() {
           unconfirmedHours,
           billablePercentage: totalHours ? (totalBillableHours / totalHours) * 100 : 0,
           unassignedPercentage: totalHours ? (totalUnassignedHours / totalHours) * 100 : 0,
-          projectSummaries: Array.from(projectMap.values()),
+          projectSummaries: projectSummariesArray,
           categorySummaries,
           dailyEntries: Array.from(dailyEntriesMap.values()),
           // Coverage disabled - showing placeholder values
           coverageData: undefined,
           coveragePercentage: 0,
-          isExpanded: false
+          isExpanded: false,
+          allEntries: userEntries // Store all entries for this user
         }
       })
   
@@ -493,6 +627,38 @@ export default function AdminDashboard() {
       isOpen: false,
       userData: null
     })
+  }
+
+  const openUnconfirmedDialog = (userData: UserTimeData) => {
+    const unconfirmedEntries = userData.allEntries.filter(entry => !entry.completed)
+    setUnconfirmedDialog({
+      isOpen: true,
+      userData,
+      entries: unconfirmedEntries
+    })
+  }
+
+  const closeUnconfirmedDialog = () => {
+    setUnconfirmedDialog({
+      isOpen: false,
+      userData: null,
+      entries: []
+    })
+  }
+
+  // Avoid hydration errors by ensuring client-side rendering
+  if (!isClient) {
+    return (
+      <div className="flex h-screen bg-gray-100">
+        <main className="flex-1 p-8">
+          <Card className="p-6">
+            <div className="flex justify-center items-center h-32">
+              <div className="text-lg">Loading...</div>
+            </div>
+          </Card>
+        </main>
+      </div>
+    )
   }
 
   return (
@@ -560,7 +726,7 @@ export default function AdminDashboard() {
 
                 <Button 
                   className="mt-6"
-                  onClick={() => startDate && endDate && fetchTimeTrackingData(startDate, endDate)}
+                  onClick={handleAnalyze}
                   disabled={isLoading || !startDate || !endDate}
                 >
                   {isLoading ? 'Loading...' : 'Analyze'}
@@ -616,10 +782,17 @@ export default function AdminDashboard() {
                         {/* KPI */}
                         <div className="mb-4">
                           <div className="grid grid-cols-4 gap-4">
-                            <div className="bg-white p-4 rounded-lg shadow-sm">
+                            <div 
+                              className="bg-white p-4 rounded-lg shadow-sm cursor-pointer hover:bg-gray-50 transition-colors border-2 border-transparent hover:border-blue-200"
+                              onClick={() => openUnconfirmedDialog(userData)}
+                              title="Click to view unconfirmed entries"
+                            >
                               <div className="text-sm text-gray-500">Unconfirmed</div>
-                              <div className="text-lg font-medium">
+                              <div className="text-lg font-medium text-blue-600">
                                 {formatHoursAndMinutes(userData.unconfirmedHours)}
+                              </div>
+                              <div className="text-xs text-blue-500 mt-1">
+                                Click to view details
                               </div>
                             </div>
                             <div className="bg-white p-4 rounded-lg shadow-sm">
@@ -729,8 +902,20 @@ export default function AdminDashboard() {
 
 
                         <div>
-                          <h3 className="font-medium mb-2">Projects</h3>
+                          <h3 className="font-medium mb-2">Projects ({userData.projectSummaries.length})</h3>
                           <div className="space-y-2">
+                            {userData.projectSummaries.length === 0 && (
+                              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                                <p className="text-yellow-800 text-sm">
+                                  <strong>No projects found.</strong> This could mean:
+                                  <ul className="mt-2 ml-4 list-disc">
+                                    <li>No time entries have project_id assigned</li>
+                                    <li>All time is recorded as unassigned</li>
+                                    <li>Check console logs for detailed debugging info</li>
+                                  </ul>
+                                </p>
+                              </div>
+                            )}
                             {userData.projectSummaries.map((project) => (
                               <div
                                 key={project.projectId}
@@ -752,9 +937,9 @@ export default function AdminDashboard() {
                                 </div>
                                 <div className="mt-2 bg-gray-200 rounded-full h-2">
                                   <div
-                                    className={`h-2 rounded-full ${
-                                      project.isBillable ? 'bg-green-500' : 'bg-orange-500'
-                                    }`}
+                                                                          className={`h-2 rounded-full ${
+                                        project.isBillable ? 'bg-green-500' : 'bg-orange-500'
+                                      }`}
                                     style={{ width: `${Math.max(0, Math.min(100, project.percentage || 0))}%` }}
                                   ></div>
                                 </div>
@@ -825,7 +1010,7 @@ export default function AdminDashboard() {
                       onClick={() => toggleDailyEntryExpansion(sidebar.userData!, entry.date)}
                     >
                       <span className="font-medium">
-                        {safeFormatDate(entry.date, 'EEEE, MMMM d, yyyy')}
+                        {isClient ? safeFormatDate(entry.date, 'EEEE, MMMM d, yyyy') : 'Loading...'}
                       </span>
                       <div className="flex items-center gap-4">
                         <span className="text-gray-600">
@@ -933,6 +1118,144 @@ export default function AdminDashboard() {
           </div>
         )}
       </div>
+
+      {/* Unconfirmed Entries Dialog */}
+      <Dialog open={unconfirmedDialog.isOpen} onOpenChange={closeUnconfirmedDialog}>
+        <DialogContent className="max-w-6xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-orange-500" />
+              Unconfirmed Time Entries
+              {unconfirmedDialog.userData && (
+                <span className="text-sm font-normal text-gray-500">
+                  - {unconfirmedDialog.userData.nominative} ({unconfirmedDialog.entries.length} entries)
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          
+          {unconfirmedDialog.entries.length > 0 ? (
+            <div className="space-y-4">
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                <p className="text-sm text-orange-800">
+                  <strong>These time entries need confirmation.</strong> They represent work that has been tracked but not yet approved or finalized.
+                </p>
+              </div>
+
+              <div className="border rounded-lg bg-white">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-gray-50">
+                      <TableHead>Start Time</TableHead>
+                      <TableHead>End Time</TableHead>
+                      <TableHead>Duration</TableHead>
+                      <TableHead>Project</TableHead>
+                      <TableHead>Category</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {unconfirmedDialog.entries
+                      .sort((a, b) => b.start_time - a.start_time) // Most recent first
+                      .map((entry) => (
+                        <TableRow key={entry.uid} className="hover:bg-gray-50">
+                          <TableCell className="font-mono text-sm">
+                            {isClient ? safeFormatDate(entry.start_time, 'dd/MM/yyyy HH:mm') : 'Loading...'}
+                          </TableCell>
+                          <TableCell className="font-mono text-sm">
+                            {isClient ? safeFormatDate(entry.end_time, 'dd/MM/yyyy HH:mm') : 'Loading...'}
+                          </TableCell>
+                          <TableCell>
+                            <span className="font-medium">
+                              {formatHoursAndMinutes((entry.end_time - entry.start_time) / 3600000)}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            {entry.project ? (
+                              <div>
+                                <div className="font-medium">{entry.project.title}</div>
+                                <div className={`text-xs ${entry.project.not_billable ? 'text-orange-600' : 'text-green-600'}`}>
+                                  {entry.project.not_billable ? 'Non-billable' : 'Billable'}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-gray-400 italic">Unassigned</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {entry.category ? (
+                              <div className="flex items-center gap-2">
+                                <div 
+                                  className="w-3 h-3 rounded-full flex-shrink-0" 
+                                  style={{ backgroundColor: entry.category.color }}
+                                />
+                                <span className="text-sm">{entry.category.name}</span>
+                              </div>
+                            ) : (
+                              <span className="text-gray-400 italic">None</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <XCircle className="h-4 w-4 text-orange-500" />
+                              <span className="text-orange-700 text-sm">Unconfirmed</span>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="flex justify-between items-center pt-4 border-t">
+                <div className="text-sm text-gray-500">
+                  Total unconfirmed time: <span className="font-medium">
+                    {formatHoursAndMinutes(
+                      unconfirmedDialog.entries.reduce(
+                        (sum, entry) => sum + (entry.end_time - entry.start_time) / 3600000, 
+                        0
+                      )
+                    )}
+                  </span>
+                </div>
+                <Button variant="outline" onClick={closeUnconfirmedDialog}>
+                  Close
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <CheckCircle className="h-12 w-12 text-green-500 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-gray-900 mb-2">All entries confirmed!</h3>
+              <p className="text-gray-500">
+                This user has no unconfirmed time entries. All tracked time has been approved.
+              </p>
+              <Button variant="outline" onClick={closeUnconfirmedDialog} className="mt-4">
+                Close
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
+  )
+}
+
+// Main component wrapped in Suspense
+export default function AdminDashboard() {
+  return (
+    <Suspense fallback={
+      <div className="flex h-screen bg-gray-100">
+        <main className="flex-1 p-8">
+          <Card className="p-6">
+            <div className="flex justify-center items-center h-32">
+              <div className="text-lg">Loading...</div>
+            </div>
+          </Card>
+        </main>
+      </div>
+    }>
+      <AnalysisDashboardContent />
+    </Suspense>
   )
 }

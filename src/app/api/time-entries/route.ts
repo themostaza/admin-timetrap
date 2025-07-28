@@ -7,6 +7,8 @@ interface TimeEntryWithDetails {
   start_time: number
   end_time: number
   completed: boolean
+  project_id?: string
+  category_id?: string
   project_uid?: string
   project_title?: string
   project_not_billable?: boolean
@@ -38,6 +40,8 @@ export async function POST(request: Request) {
         tbe.start_time,
         tbe.end_time,
         tbe.completed,
+        tbe.project_id,
+        tbe.category_id,
         p.uid as project_uid,
         p.title as project_title,
         p.not_billable as project_not_billable,
@@ -61,6 +65,8 @@ export async function POST(request: Request) {
       start_time: row.start_time,
       end_time: row.end_time,
       completed: row.completed,
+      project_id: row.project_id || null,
+      category_id: row.category_id || null,
       project: row.project_uid ? {
         uid: row.project_uid,
         title: row.project_title,
@@ -72,6 +78,20 @@ export async function POST(request: Request) {
         color: row.category_color
       } : null
     }))
+
+    // Log project IDs found
+    const entriesWithProjects = timeEntries.filter(entry => entry.project_id)
+    console.log(`Found ${entriesWithProjects.length} entries with project IDs out of ${timeEntries.length} total entries`)
+    
+    if (entriesWithProjects.length > 0) {
+      console.log('Project IDs found:', entriesWithProjects.map(entry => ({
+        entryId: entry.uid,
+        projectId: entry.project_id,
+        projectTitle: entry.project?.title
+      })))
+    } else {
+      console.log('No entries with project IDs found in this date range')
+    }
 
     return NextResponse.json({
       entries: timeEntries,
